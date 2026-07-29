@@ -7,6 +7,9 @@
 </head>
 <body>
   <main>
+    <div id="offline" hidden>
+      <b>disconnected</b> — no reply from the viewer server. Is <code>npm run viewer</code> still running?
+    </div>
     <section id="stage">
       <div id="canvas-wrap">
         <canvas id="map"></canvas>
@@ -73,16 +76,48 @@
       <div class="composition" id="composition"></div>
       <div class="legend" id="legend"></div>
 
+      <!--
+        THE COMPOSER IS THE PRIMARY CONTROL, and the preset dropdown below it is
+        demoted to "load a starting point". A world is configured, not chosen: every
+        cycle here can be switched on, duplicated, and retuned, and the preset row
+        exists only to fill the fields with something known to work.
+      -->
+      <h2>Cycles <span class="tag" id="cycle-tag"></span></h2>
+      <div id="composer"></div>
+      <div class="add-row" id="add-row"></div>
+
+      <div class="preset-row">
+        <select id="preset" title="A starting point to load, not the world itself"></select>
+        <button id="load-preset">Load</button>
+      </div>
+
       <h2>World</h2>
+      <div class="pair">
+        <label class="field">
+          <span class="field-label">width</span>
+          <input type="number" id="width" step="8" min="16">
+        </label>
+        <label class="field">
+          <span class="field-label">height</span>
+          <input type="number" id="height" step="2" min="16">
+        </label>
+      </div>
       <label class="field">
         <span class="field-label">seed</span>
         <input type="number" id="seed" value="1" step="1">
       </label>
-      <label class="field">
-        <span class="field-label">cycles</span>
-        <select id="preset"></select>
-      </label>
+      <p class="cost" id="cost"></p>
       <button id="reset" class="wide">Regenerate</button>
+      <p class="message" id="message" hidden></p>
+
+      <!--
+        The one description of a cycle set that is measured rather than asserted: the
+        transition graph restricted to the flags these cycles can raise. Explicit
+        because it is expensive — see the note the panel prints alongside it.
+      -->
+      <h2>Missing chemistry</h2>
+      <button id="analyse" class="wide">Analyse this cycle set</button>
+      <div id="reach"></div>
 
       <h2>View</h2>
       <label class="field">

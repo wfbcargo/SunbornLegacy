@@ -239,9 +239,16 @@ async function fetchFrame() {
 
 let lastDrawnDay = -1;
 let lastDrawnGeneration = -1;
+let lastSyncedGeneration = -1;
 
 async function refresh() {
   await fetchFrame();
+  // A new world — this tab's Regenerate, or another tab's — replaces what the composer
+  // is mirroring, unless this tab has an edit in flight.
+  if (status.generation !== lastSyncedGeneration) {
+    lastSyncedGeneration = status.generation;
+    if (meta !== null) syncComposerFromServer();
+  }
   if (
     status.day !== lastDrawnDay ||
     status.generation !== lastDrawnGeneration ||
@@ -350,13 +357,21 @@ function paintPanel() {
   paintComposition();
 
   // Keep the form showing the world that actually exists. The server is the source of
-  // truth for seed and preset, not the boxes — a second tab, or a restart against a
-  // session already running, would otherwise show controls that describe nothing.
-  // Skipped while focused, so it cannot rewrite a value mid-edit.
-  syncField($('seed'), String(status.seed));
-  syncField($('preset'), status.preset);
+  // truth for seed, size and cycles, not the boxes — a second tab, or a restart against
+  // a session already running, would otherwise show controls that describe nothing.
+  //
+  // But NOT once the user has started composing. `formDirty` is the pending-edit flag:
+  // a half-typed 480 being overwritten by the running world's 240 twice a second is the
+  // classic version of this bug, and it makes the panel feel possessed.
+  if (!formDirty) {
+    syncField($('seed'), String(status.seed));
+    syncField($('width'), String(status.width));
+    syncField($('height'), String(status.height));
+  }
   syncField($('speed'), String(status.speed));
   if (document.activeElement !== $('speed')) $('speed-value').textContent = String(status.speed);
+
+  paintCost();
 
   $('footnote').textContent =
     `${status.width}×${status.height} torus · ${(status.width * status.height).toLocaleString()} tiles · ` +
@@ -395,6 +410,467 @@ function paintComposition() {
     share.textContent = pct(b.share);
     row.append(swatch, name, share);
     legend.append(row);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The composer
+// ---------------------------------------------------------------------------
+
+/**
+ * The composed cycle set, as `[{ kind, key, values }]`.
+ *
+ * This is the editable mirror of the world's `cycles`, not a second source of truth:
+ * the server owns the world, this owns the pending edit, and `Regenerate` is the only
+ * thing that closes the gap. Values are held one per catalogue parameter rather than as
+ * a sparse spec so that every field has something to show; `specFromInstance` narrows
+ * them back down to the differences when the set is sent.
+ */
+let composed = [];
+/** Set by any edit to the composer or the size fields; cleared when a world is built. */
+let formDirty = false;
+/** Which cards are expanded, by key, so a re-render does not collapse them all. */
+const openCards = new Set();
+
+const kindEntry = (kind) => meta.cycleCatalogue.find((e) => e.kind === kind);
+
+function instanceFromSpec(spec) {
+  const entry = kindEntry(spec.kind);
+  const values = {};
+  for (const p of entry.params) values[p.name] = p.default;
+  for (const [name, value] of Object.entries(spec)) {
+    if (name === 'kind' || name === 'key') continue;
+    if (name in values) values[name] = value;
+  }
+  return { kind: spec.kind, key: spec.key ?? entry.defaultKey, values };
+}
+
+/**
+ * Narrow an instance back to a spec: kind, key only when it is not the kind's default,
+ * and only the parameters that differ from their defaults.
+ *
+ * The key rule is load-bearing rather than tidiness. A cycle's key seeds its RNG stream,
+ * so sending `key: "solarbeam"` where the preset omitted the key — and `makeCycle`
+ * would have used `"beam"` — produces a DIFFERENT world from the same preset: different
+ * fault lines, different vents, different phase. Omitting defaults is what makes
+ * "load crucible, press Regenerate" reproduce the crucible the CLI runs.
+ */
+function specFromInstance(inst) {
+  const entry = kindEntry(inst.kind);
+  const spec = { kind: inst.kind };
+  if (inst.key !== entry.defaultKey) spec.key = inst.key;
+  for (const p of entry.params) {
+    if (inst.values[p.name] !== p.default) spec[p.name] = inst.values[p.name];
+  }
+  return spec;
+}
+
+const composedSpecs = () => composed.map(specFromInstance);
+
+/** A key nothing else is using. Two cycles sharing one are one cycle run twice. */
+function uniqueKey(kind) {
+  const taken = new Set(composed.map((c) => c.key));
+  const base = kindEntry(kind).defaultKey;
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n++) if (!taken.has(`${base}-${n}`)) return `${base}-${n}`;
+}
+
+/**
+ * Which preset the composed set currently IS, or 'custom'.
+ *
+ * Compared by value rather than remembered from the last Load, so undoing an edit by
+ * hand gets the preset's name back and a one-digit change loses it. The label is
+ * display only — the world is built from the specs, never from the name.
+ */
+function presetLabel() {
+  const mine = JSON.stringify(composedSpecs());
+  for (const [name, specs] of Object.entries(meta.presetCycles)) {
+    if (JSON.stringify(specs) === mine) return name;
+  }
+  return 'custom';
+}
+
+function paramRow(inst, index, def) {
+  const row = document.createElement('label');
+  row.className = 'param';
+  const value = inst.values[def.name];
+  if (value !== def.default) row.classList.add('changed');
+
+  const name = document.createElement('span');
+  name.textContent = def.label;
+  if (def.unit) {
+    const u = document.createElement('u');
+    u.textContent = ` ${def.unit}`;
+    name.append(u);
+  }
+
+  let input;
+  if (def.type === 'boolean') {
+    input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = value === true;
+  } else if (def.type === 'choice') {
+    input = document.createElement('select');
+    for (const choice of def.choices) {
+      const option = document.createElement('option');
+      option.value = String(choice);
+      option.textContent = String(choice);
+      input.append(option);
+    }
+    input.value = String(value);
+  } else {
+    input = document.createElement('input');
+    input.type = 'number';
+    input.value = String(value);
+    if (def.min !== undefined) input.min = String(def.min);
+    if (def.max !== undefined) input.max = String(def.max);
+    input.step = def.type === 'integer' ? '1' : 'any';
+  }
+
+  input.addEventListener('input', () => {
+    formDirty = true;
+    if (def.type === 'boolean') inst.values[def.name] = input.checked;
+    else inst.values[def.name] = Number(input.value);
+    row.classList.toggle('changed', inst.values[def.name] !== def.default);
+    paintCost();
+  });
+
+  const note = document.createElement('span');
+  note.className = 'param-note';
+  const range =
+    def.min !== undefined && def.max !== undefined ? ` · ${def.min}–${def.max}` : '';
+  note.textContent = `${def.note} · default ${def.default}${range}`;
+
+  row.append(name, input, note);
+  return row;
+}
+
+function cycleCard(inst, index) {
+  const entry = kindEntry(inst.kind);
+  const card = document.createElement('details');
+  card.className = 'cycle';
+  card.open = openCards.has(inst.key);
+  card.addEventListener('toggle', () => {
+    if (card.open) openCards.add(inst.key);
+    else openCards.delete(inst.key);
+  });
+
+  const head = document.createElement('summary');
+  const kind = document.createElement('b');
+  kind.className = 'cycle-kind';
+  kind.textContent = inst.kind;
+  const key = document.createElement('span');
+  key.className = 'cycle-key';
+  key.textContent = inst.key;
+  const label = document.createElement('span');
+  label.className = 'cycle-label';
+  label.textContent = entry.label;
+  head.append(kind, key, label);
+
+  const body = document.createElement('div');
+  body.className = 'cycle-body';
+
+  const summary = document.createElement('p');
+  summary.className = 'cycle-summary';
+  summary.textContent = entry.summary;
+
+  const flags = document.createElement('p');
+  flags.className = 'cycle-flags';
+  flags.append(document.createTextNode('raises '));
+  for (const f of entry.flags) {
+    const i = document.createElement('i');
+    i.textContent = f;
+    flags.append(i, document.createTextNode(' '));
+  }
+
+  const params = document.createElement('div');
+  params.className = 'params';
+
+  // The key is editable because it is not decoration: it seeds this cycle's own random
+  // stream, so two monsoons with different keys are genuinely different monsoons — out
+  // of phase, and that is a world somebody may want.
+  const keyRow = document.createElement('label');
+  keyRow.className = 'param';
+  const keyName = document.createElement('span');
+  keyName.textContent = 'key';
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.value = inst.key;
+  keyInput.addEventListener('input', () => {
+    formDirty = true;
+    inst.key = keyInput.value;
+  });
+  const keyNote = document.createElement('span');
+  keyNote.className = 'param-note';
+  keyNote.textContent =
+    'Seeds this cycle’s own random stream, so two cycles of one kind differ. Must be unique.';
+  keyRow.append(keyName, keyInput, keyNote);
+  params.append(keyRow);
+
+  for (const def of entry.params) params.append(paramRow(inst, index, def));
+
+  const actions = document.createElement('div');
+  actions.className = 'cycle-actions';
+  const dup = document.createElement('button');
+  dup.textContent = 'Duplicate';
+  dup.title = 'A second cycle of this kind, with its own key and therefore its own dice';
+  dup.addEventListener('click', () => {
+    formDirty = true;
+    composed.splice(index + 1, 0, {
+      kind: inst.kind,
+      key: uniqueKey(inst.kind),
+      values: { ...inst.values },
+    });
+    renderComposer();
+  });
+  const remove = document.createElement('button');
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => {
+    formDirty = true;
+    openCards.delete(inst.key);
+    composed.splice(index, 1);
+    renderComposer();
+  });
+  actions.append(dup, remove);
+
+  body.append(summary, flags, params, actions);
+  card.append(head, body);
+  return card;
+}
+
+function renderComposer() {
+  const host = $('composer');
+  host.innerHTML = '';
+
+  if (composed.length === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    // R-005, and the reason this panel exists: fewer cycles is not a gentler world, it
+    // is a deader one.
+    empty.textContent =
+      'No cycles. A world with no disturbance converges on a frozen equilibrium — ' +
+      'measured churn 0.29%, against three to five times that on every disturbed world.';
+    host.append(empty);
+  }
+
+  composed.forEach((inst, i) => host.append(cycleCard(inst, i)));
+
+  const dupes = composed.length - new Set(composed.map((c) => c.key)).size;
+  $('cycle-tag').textContent =
+    `${composed.length} cycle${composed.length === 1 ? '' : 's'} · ${presetLabel()}` +
+    (dupes > 0 ? ' · duplicate keys' : '');
+
+  paintCost();
+  paintReach();
+}
+
+function renderAddRow() {
+  const host = $('add-row');
+  host.innerHTML = '';
+  for (const entry of meta.cycleCatalogue) {
+    const button = document.createElement('button');
+    button.textContent = `+ ${entry.kind}`;
+    button.title = `${entry.label} — ${entry.summary}`;
+    button.addEventListener('click', () => {
+      formDirty = true;
+      const key = uniqueKey(entry.kind);
+      composed.push(instanceFromSpec({ kind: entry.kind, key }));
+      openCards.add(key);
+      renderComposer();
+    });
+    host.append(button);
+  }
+}
+
+/** Adopt the world the server actually has. Never while an edit is in flight. */
+function syncComposerFromServer() {
+  if (formDirty) return;
+  composed = status.cycles.map(instanceFromSpec);
+  renderComposer();
+}
+
+// ---------------------------------------------------------------------------
+// Cost — visible before it is paid
+// ---------------------------------------------------------------------------
+
+const KIB = (bytes) => `${(bytes / 1024).toFixed(0)} KiB`;
+
+/**
+ * What the current world costs, and what the pending one would.
+ *
+ * The projection scales the world's own MEASURED ms/day by tile count, which is sound
+ * because the simulation is linear in tiles — measured 92 ns/tile with no cycles and
+ * 125 ns/tile with all five, flat from 2,048 to 864,000 tiles. It does not attempt to
+ * price adding a cycle, because that depends on which cycle: a dormant beam costs
+ * nothing at all, since a cycle whose `dayState` returns null is dropped from the
+ * per-tile loop entirely.
+ */
+function paintCost() {
+  if (status === null) return;
+  const el = $('cost');
+  const liveTiles = status.width * status.height;
+  const measured = status.msPerDay;
+
+  let text =
+    `<b>${liveTiles.toLocaleString()}</b> tiles · ` +
+    `<b>${measured > 0 ? `${measured.toFixed(1)} ms` : '—'}</b> per simulated day · ` +
+    `${KIB(status.frameBytes)} per frame · ${status.cycles.length} live cycle` +
+    `${status.cycles.length === 1 ? '' : 's'}`;
+
+  const w = Number($('width').value);
+  const h = Number($('height').value);
+  const pendingTiles = w * h;
+  if (Number.isFinite(pendingTiles) && pendingTiles > 0 && pendingTiles !== liveTiles) {
+    const projected = measured > 0 ? (measured * pendingTiles) / liveTiles : 0;
+    const perTick = projected * 3;
+    text +=
+      `<br>pending <b>${w}×${h}</b> → <b>${pendingTiles.toLocaleString()}</b> tiles · ` +
+      (projected > 0 ? `~<b>${projected.toFixed(1)} ms</b> per day projected · ` : '') +
+      `${KIB(pendingTiles * 2)} per frame` +
+      (perTick > 120
+        ? ` · <span class="warn">at 60 days/s that is ~${perTick.toFixed(0)} ms of blocked` +
+          ' event loop per tick</span>'
+        : '');
+  }
+
+  const cycleCount = composed.length;
+  if (cycleCount !== status.cycles.length) {
+    text += `<br>pending <b>${cycleCount}</b> cycle${cycleCount === 1 ? '' : 's'}` +
+      ' · a dormant cycle costs nothing per tile; an active one costs one pass over the map';
+  }
+
+  el.innerHTML = text;
+}
+
+function showMessage(text, ok = false) {
+  const el = $('message');
+  el.hidden = text === null;
+  el.className = ok ? 'message ok' : 'message';
+  el.textContent = text ?? '';
+}
+
+// ---------------------------------------------------------------------------
+// Missing chemistry — which biomes this cycle set can never make
+// ---------------------------------------------------------------------------
+
+/** Result keyed by the sorted kind list it was computed for. */
+let reachResult = null;
+let reachKey = null;
+let reachPending = false;
+let reachProgress = null;
+
+const kindKey = () => [...new Set(composed.map((c) => c.kind))].sort().join('+') || '(none)';
+
+function paintReach() {
+  const el = $('reach');
+  const key = kindKey();
+
+  if (reachPending) {
+    const p = reachProgress;
+    el.innerHTML =
+      `sweeping the ruleset${p && p.total ? ` · ${p.done}/${p.total} rules` : ''}` +
+      '<p class="caveat">A restricted world is the slow case: a rule that CANNOT fire has ' +
+      'to be ruled out across every probe. Measured 0.2 s for all five kinds, 4.7 s for ' +
+      'none, 30.8 s for seasons + monsoon + tectonics. Cached once done.</p>';
+    return;
+  }
+
+  if (reachResult === null || reachKey !== key) {
+    el.innerHTML =
+      reachKey === null
+        ? '<p class="caveat">Not measured for this set yet.</p>'
+        : `<p class="caveat">Cycle kinds changed since the last analysis (${reachKey}). ` +
+          'Run it again.</p>';
+    return;
+  }
+
+  const outside = reachResult.outside;
+  if (outside.length === 0) {
+    el.innerHTML =
+      `<span class="none">All ${reachResult.totalBiomes} biomes are reachable and can cycle.</span>` +
+      caveat(reachResult);
+    return;
+  }
+
+  const list = document.createElement('ul');
+  for (const o of outside) {
+    const biome = meta.biomes.find((b) => b.key === o.key);
+    const li = document.createElement('li');
+    const swatch = document.createElement('i');
+    swatch.style.background = biome ? biome.hex : '#000';
+    const name = document.createElement('b');
+    name.textContent = biome ? biome.name : o.key;
+    const why = document.createElement('span');
+    // Three different statements, and conflating them would be the easy mistake:
+    // "nothing can make it" is not "nothing can unmake it", and a biome can be outside
+    // the main cycle while both entering and leaving — soil on a still world is reachable
+    // only from lava and ash, which that world cannot make either.
+    why.textContent =
+      o.inEdges === 0
+        ? 'nothing here creates it'
+        : o.outEdges === 0
+          ? 'permanent once formed'
+          : 'off the main cycle';
+    li.append(swatch, name, why);
+    list.append(li);
+  }
+
+  el.innerHTML = `<b>${outside.length}</b> of ${reachResult.totalBiomes} biomes cannot take part:`;
+  el.append(list);
+  el.insertAdjacentHTML('beforeend', caveat(reachResult));
+}
+
+function caveat(result) {
+  return (
+    '<p class="caveat">Measured from the transition ruleset restricted to the flags these ' +
+    `cycle KINDS can raise (${result.core.length}/${result.totalBiomes} in the core, ` +
+    `${result.liveEdges} live edges${
+      result.allowedFlagNames.length ? `, flags: ${result.allowedFlagNames.join(' ')}` : ', no flags'
+    }). Parameter values are not modelled, so “cannot” is a hard fact and “can” is a ` +
+    'possibility. Worldgen may still seed a biome at day 0; if nothing here creates it, ' +
+    'it does not come back.</p>'
+  );
+}
+
+async function analyse() {
+  const key = kindKey();
+  // Capture the set ONCE. Re-reading composedSpecs() on each poll would start computing
+  // whatever is on screen now while the completion is still labelled with the key taken
+  // at the start — edit the kinds mid-sweep and revert before it finishes, and the panel
+  // shows one set's result under another set's name.
+  const specs = composedSpecs();
+  reachPending = true;
+  reachProgress = null;
+  paintReach();
+  try {
+    for (;;) {
+      const res = await fetch('/api/reachability', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cycles: specs }),
+      });
+      const body = await res.json();
+      if (!res.ok || body.ok !== true) {
+        reachPending = false;
+        showMessage(body.error ?? `reachability ${res.status}`);
+        paintReach();
+        return;
+      }
+      if (body.ready === true) {
+        reachPending = false;
+        reachResult = { ...body.core, totalBiomes: body.totalBiomes };
+        reachKey = key;
+        paintReach();
+        return;
+      }
+      reachProgress = body.progress;
+      paintReach();
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  } catch (err) {
+    reachPending = false;
+    paintReach();
+    noteFailure(err);
   }
 }
 
@@ -469,17 +945,34 @@ canvas.addEventListener('mouseleave', () => {
 // Controls
 // ---------------------------------------------------------------------------
 
+/**
+ * Send a control action.
+ *
+ * Returns whether it succeeded, and surfaces the server's message in the panel rather
+ * than only in the console. That is not politeness: the size and cycle validation lives
+ * on the server and its whole purpose is to say WHY a world was refused, which is
+ * useless if the only place it lands is devtools.
+ */
 async function control(body) {
-  const res = await fetch('/api/control', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    console.error('control failed', err);
+  try {
+    const res = await fetch('/api/control', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      showMessage(err.error ?? `the server refused that (${res.status})`);
+      return false;
+    }
+    setOffline(false);
+    await refresh();
+    return true;
+  } catch (err) {
+    // With the server gone, Play and Step used to do nothing at all, silently.
+    noteFailure(err);
+    return false;
   }
-  await refresh();
 }
 
 $('play').addEventListener('click', () =>
@@ -493,9 +986,57 @@ $('speed').addEventListener('input', (e) => {
 });
 $('speed').addEventListener('change', (e) => control({ action: 'speed', speed: Number(e.target.value) }));
 
-$('reset').addEventListener('click', () =>
-  control({ action: 'reset', seed: Number($('seed').value), preset: $('preset').value }),
-);
+/**
+ * Regenerate: apply the composed cycle set AND the size in one build.
+ *
+ * Both at once on purpose — they are the same decision. A resize changes what every
+ * cycle's geometry means (a monsoon's travel is the whole torus, a fault's slope is
+ * width/height), so applying one without the other would show a world nobody described.
+ */
+$('reset').addEventListener('click', async () => {
+  showMessage(null);
+  const ok = await control({
+    action: 'reset',
+    seed: Number($('seed').value),
+    width: Number($('width').value),
+    height: Number($('height').value),
+    cycles: composedSpecs(),
+    preset: presetLabel(),
+  });
+  if (!ok) return;
+  // The world now IS what the form says, so the pending-edit flag has served its purpose
+  // and the panel goes back to mirroring the server.
+  formDirty = false;
+  syncComposerFromServer();
+  showMessage(
+    `built ${status.width}×${status.height} · ${status.cycles.length} cycles · seed ${status.seed}`,
+    true,
+  );
+});
+
+$('load-preset').addEventListener('click', () => {
+  const name = $('preset').value;
+  const specs = meta.presetCycles[name];
+  if (specs === undefined) return;
+  formDirty = true;
+  openCards.clear();
+  // Deep-copied: the composer edits its own objects, never meta's.
+  composed = specs.map((s) => instanceFromSpec(JSON.parse(JSON.stringify(s))));
+  renderComposer();
+  showMessage(
+    `loaded "${name}" into the composer — nothing is built until you press Regenerate.`,
+    true,
+  );
+});
+
+$('analyse').addEventListener('click', () => analyse());
+
+for (const id of ['width', 'height', 'seed']) {
+  $(id).addEventListener('input', () => {
+    formDirty = true;
+    paintCost();
+  });
+}
 
 $('zoom').addEventListener('input', (e) => {
   $('zoom-value').textContent = e.target.value;
@@ -516,6 +1057,39 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---------------------------------------------------------------------------
+// Connection state
+// ---------------------------------------------------------------------------
+
+/**
+ * The client had exactly one failure state — `boot()` replacing the page — and lost it
+ * the moment startup succeeded. After that, a dead server produced a console.error every
+ * 500 ms behind a panel that still showed numbers, and Play, Step and Regenerate did
+ * nothing without saying so.
+ *
+ * Three consecutive failures rather than one, because a single miss is what a
+ * Regenerate at 262,144 tiles looks like from here: the server is busy building, not
+ * gone. Polling slows to 2 s while offline so a dead server is not hammered, and the
+ * first success clears the banner.
+ */
+const OFFLINE_AFTER = 3;
+let failures = 0;
+let offline = false;
+
+function setOffline(value) {
+  if (value === false) failures = 0;
+  if (value === offline) return;
+  offline = value;
+  $('offline').hidden = !value;
+}
+
+function noteFailure(err) {
+  failures++;
+  if (failures >= OFFLINE_AFTER) setOffline(true);
+  // Kept, but no longer the only evidence anything is wrong.
+  console.error('viewer request failed', err);
+}
+
+// ---------------------------------------------------------------------------
 // Poll loop
 // ---------------------------------------------------------------------------
 
@@ -527,11 +1101,13 @@ document.addEventListener('keydown', (e) => {
 async function loop() {
   try {
     await refresh();
+    setOffline(false);
   } catch (err) {
-    console.error('refresh failed', err);
+    noteFailure(err);
   }
-  const delay =
-    status !== null && status.playing
+  const delay = offline
+    ? 2000
+    : status !== null && status.playing
       ? Math.max(60, Math.min(500, 1000 / status.speed))
       : 500;
   setTimeout(loop, delay);
@@ -549,10 +1125,20 @@ async function boot() {
   }
 
   await fetchFrame();
-  select.value = status.preset;
+  select.value = meta.presets.includes(status.preset) ? status.preset : meta.presets[0];
   $('seed').value = String(status.seed);
+  $('width').value = String(status.width);
+  $('height').value = String(status.height);
   $('speed').value = String(status.speed);
   $('speed-value').textContent = String(status.speed);
+  $('width').max = String(meta.limits.maxSide);
+  $('height').max = String(meta.limits.maxSide);
+  $('width').min = String(meta.limits.minWidth);
+  $('height').min = String(meta.limits.minHeight);
+  $('width').step = String(meta.limits.bandCols);
+
+  renderAddRow();
+  syncComposerFromServer();
 
   render();
   paintPanel();

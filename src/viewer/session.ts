@@ -14,7 +14,7 @@
 
 import { World } from '../sim/world.ts';
 import { assessStability, sample, type Sample, type StabilityVerdict } from '../sim/report.ts';
-import { CYCLE_PRESETS } from '../sim/cycles.ts';
+import type { CycleSpec } from '../sim/cycles.ts';
 
 /**
  * Rolling sample window, in days.
@@ -38,6 +38,15 @@ export interface SessionOptions {
   width: number;
   height: number;
   seed: number;
+  /**
+   * The world's cycles, as plain specs. This — not a preset name — is what a world is
+   * made of; a preset is only a starting point somebody loaded once.
+   */
+  cycles: CycleSpec[];
+  /**
+   * Where those cycles came from, for display: a preset name while they still match it,
+   * `custom` once they do not. Never used to rebuild the world.
+   */
   preset: string;
 }
 
@@ -56,6 +65,25 @@ export interface SessionStatus {
   entropy: number;
   proportions: number[];
   verdict: StabilityVerdict;
+  /**
+   * The composed set this world was built from, so the composer can sync to it.
+   *
+   * The SPECS, not `describe()`. This rides along on every frame — up to 15 a second —
+   * and a full description carries each cycle's prose summary, which measured 5,037
+   * bytes of header for four cycles against ~600 for the specs. The client already has
+   * every summary from `/api/meta`, keyed by kind, so sending them again per frame buys
+   * nothing.
+   */
+  cycles: CycleSpec[];
+  /**
+   * Measured cost of one simulated day, in milliseconds — the number that makes a
+   * 480×288 world with five cycles an informed choice rather than a surprise. Wall
+   * clock, and therefore presentation only: it is measured AROUND `stepDay`, never
+   * inside it, and no seed, sample or rule can see it (R-004).
+   */
+  msPerDay: number;
+  /** The frame's two byte planes, one byte per tile each. The JSON header adds ~500 more. */
+  frameBytes: number;
 }
 
 export class ViewerSession {
@@ -64,10 +92,14 @@ export class ViewerSession {
   height: number;
   seed: number;
   preset: string;
+  cycles: CycleSpec[];
 
   playing = false;
   speed = 6;
   generation = 0;
+
+  /** Exponential mean of measured ms per simulated day. 0 until the first step. */
+  private msPerDay = 0;
 
   private samples: Sample[] = [];
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -76,14 +108,13 @@ export class ViewerSession {
     this.width = opts.width;
     this.height = opts.height;
     this.seed = opts.seed;
+    this.cycles = opts.cycles;
     this.preset = opts.preset;
     this.world = this.build();
     this.samples = [sample(this.world)];
   }
 
   private build(): World {
-    const cycles = CYCLE_PRESETS[this.preset];
-    if (cycles === undefined) throw new Error(`Unknown cycle preset: ${this.preset}`);
     // Specs are passed straight through. `makeCycle` destructures every spec into a
     // fresh params object and never writes back to it, so the preset table cannot be
     // mutated by having been used — a defensive copy here would only obscure that.
@@ -91,26 +122,54 @@ export class ViewerSession {
       width: this.width,
       height: this.height,
       seed: this.seed,
-      cycles,
+      cycles: this.cycles,
     });
   }
 
-  /** Rebuild the world from scratch. Same seed + preset ⇒ the same world, every time. */
+  /**
+   * Rebuild the world from scratch. Same seed + same cycles ⇒ the same world, every time.
+   *
+   * The new world is built into a LOCAL first and only committed if it succeeds. A
+   * half-applied reset is the failure mode to avoid here: assigning `this.height = 143`
+   * and then letting `HexTorus` throw would leave the session reporting a height its
+   * `world` does not have, and the client decodes the frame's byte planes using exactly
+   * that number — so the map would silently shear instead of the request failing.
+   */
   reset(opts: Partial<SessionOptions> = {}): void {
+    const width = opts.width ?? this.width;
+    const height = opts.height ?? this.height;
+    const seed = opts.seed === undefined ? this.seed : Math.floor(opts.seed);
+    const cycles = opts.cycles ?? this.cycles;
+
+    const world = new World({ width, height, seed, cycles });
+
     this.pause();
-    if (opts.seed !== undefined) this.seed = Math.floor(opts.seed);
+    this.width = width;
+    this.height = height;
+    this.seed = seed;
+    this.cycles = cycles;
     if (opts.preset !== undefined) this.preset = opts.preset;
-    if (opts.width !== undefined) this.width = opts.width;
-    if (opts.height !== undefined) this.height = opts.height;
-    this.world = this.build();
+    this.world = world;
+    // The sample window belongs to the world that produced it. `assessStability`
+    // compares proportions ACROSS samples, so splicing pre-resize samples onto
+    // post-resize ones would report churn that never happened — and after a resize the
+    // two are not even the same length. Cost measurements go with it: a different tile
+    // count is a different cost.
     this.samples = [sample(this.world)];
+    this.msPerDay = 0;
     this.generation++;
   }
 
   /** Advance N days, recording one sample per day. */
   advance(days: number): void {
     for (let d = 0; d < days; d++) {
+      const t0 = performance.now();
       this.world.stepDay();
+      const ms = performance.now() - t0;
+      // Exponential mean: one day's timing is noisy enough to jitter the readout, and a
+      // panel number that flickers is a number nobody reads. Sampling is excluded — it
+      // is the viewer's cost, not the world's.
+      this.msPerDay = this.msPerDay === 0 ? ms : this.msPerDay * 0.8 + ms * 0.2;
       this.samples.push(sample(this.world));
     }
     if (this.samples.length > HISTORY_DAYS) {
@@ -172,6 +231,9 @@ export class ViewerSession {
       entropy: this.world.biomeEntropy(),
       proportions: [...this.world.biomeProportions()],
       verdict,
+      cycles: this.cycles,
+      msPerDay: this.msPerDay,
+      frameBytes: this.world.grid.size * 2,
     };
   }
 }

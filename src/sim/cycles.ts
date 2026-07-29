@@ -189,6 +189,12 @@ export interface CycleDescription {
   readonly key: string;
   readonly kind: string;
   readonly label: string;
+  /**
+   * What this cycle does to a world, mechanically, and what it costs or unlocks.
+   * `label` is the poetic name a player would use; this is the sentence a GM needs.
+   * Comes from CYCLE_CATALOGUE so an instance and the catalogue cannot disagree.
+   */
+  readonly summary: string;
   /** The cycle's dominant repeat time in days, for GM-facing summaries. */
   readonly periodDays: number;
   /** Flags this cycle is capable of raising. */
@@ -233,6 +239,15 @@ export abstract class WorldCycle<S = unknown> {
 
   /** Hook for per-grid precomputation (row tables, fault lines, vent sites). */
   protected onBind(): void {}
+
+  /**
+   * This kind's catalogue entry — its label, its prose summary, and the flags it can
+   * raise. `describe()` reads label/summary/flags from here rather than inlining them,
+   * so an instance and the configuration UI cannot disagree about what a cycle is.
+   */
+  protected get catalogue(): CycleCatalogueEntry {
+    return cycleCatalogueEntry(this.kind);
+  }
 
   /**
    * The cycle's derived state for one day. MUST be a pure function of
@@ -533,12 +548,14 @@ export class SolarBeam extends WorldCycle<BeamState> {
   }
 
   override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
     return {
       key: this.key,
       kind: this.kind,
-      label: 'the cleansing sweep',
+      label,
+      summary,
       periodDays: this.params.cycleDays,
-      flags: ['beam', 'focus'],
+      flags,
       params: { ...this.params },
     };
   }
@@ -748,12 +765,14 @@ export class Seasons extends WorldCycle<SeasonState> {
   }
 
   override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
     return {
       key: this.key,
       kind: this.kind,
-      label: 'the turning year',
+      label,
+      summary,
       periodDays: this.params.periodDays,
-      flags: ['heatwave', 'freeze', 'storm', 'drought'],
+      flags,
       params: { ...this.params },
     };
   }
@@ -952,12 +971,14 @@ export class Tectonics extends WorldCycle<TectonicState> {
   }
 
   override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
     return {
       key: this.key,
       kind: this.kind,
-      label: 'the shifting deeps',
+      label,
+      summary,
       periodDays: this.params.meanIntervalDays,
-      flags: ['quake', 'uplift'],
+      flags,
       params: { ...this.params },
     };
   }
@@ -1137,12 +1158,14 @@ export class Volcanism extends WorldCycle<VolcanicState> {
   }
 
   override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
     return {
       key: this.key,
       kind: this.kind,
-      label: 'the fire below',
+      label,
+      summary,
       periodDays: this.params.meanIntervalDays,
-      flags: ['eruption', 'focus', 'ashfall'],
+      flags,
       params: { ...this.params },
     };
   }
@@ -1268,16 +1291,365 @@ export class Monsoon extends WorldCycle<MonsoonState> {
   }
 
   override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
     return {
       key: this.key,
       kind: this.kind,
-      label: 'the rains',
+      label,
+      summary,
       periodDays: this.params.periodDays,
-      flags: ['storm'],
+      flags,
       params: { ...this.params },
     };
   }
 }
+
+// ===========================================================================
+// The catalogue — what exists, before any world does
+// ===========================================================================
+
+/**
+ * `describe()` is an instance method, so it can only answer questions about a cycle
+ * that has already been built into a world. A configuration UI needs the opposite:
+ * what kinds exist, what each one does, which knobs it has and what they default to,
+ * BEFORE there is a world at all. That is this table.
+ *
+ * Two rules keep it honest:
+ *
+ *   1. **Defaults are derived, never retyped.** Every `default` below is read out of
+ *      the same `*_DEFAULTS` constant the constructor uses, so the catalogue cannot
+ *      drift from the simulation by a digit.
+ *   2. **Every sentence states something that was measured.** These descriptions exist
+ *      because the good material was already written — in JSDoc, where no user ever
+ *      sees it — and it is all sourced from real runs (R-003). This is not flavour
+ *      text and must not become flavour text: a GM choosing a cycle set is making a
+ *      difficulty decision, and the numbers are the whole content of it.
+ *
+ * Note what is NOT here: `key`. A key is per-INSTANCE, not per-kind, and it seeds the
+ * cycle's RNG stream — two monsoons with different keys are genuinely different
+ * monsoons, which is why a world may hold several cycles of one kind.
+ */
+export interface CycleParamDef {
+  /** Property name on the spec. */
+  readonly name: string;
+  readonly label: string;
+  /**
+   * How to present and validate it. `integer` rejects fractions, `choice` restricts to
+   * `choices`, `boolean` is a checkbox. Everything else is a real number.
+   */
+  readonly type: 'number' | 'integer' | 'boolean' | 'choice';
+  /** Read from the kind's `*_DEFAULTS` constant, never written by hand. */
+  readonly default: number | boolean;
+  /** Advisory-but-enforced bounds. Outside them the cycle stops meaning anything. */
+  readonly min?: number;
+  readonly max?: number;
+  readonly choices?: readonly number[];
+  readonly unit?: string;
+  /** One line on what the number does. Mined from the JSDoc above. */
+  readonly note: string;
+}
+
+export interface CycleCatalogueEntry {
+  readonly kind: string;
+  /** The poetic name, matching `describe().label`. */
+  readonly label: string;
+  /** What it does mechanically, and what it costs or unlocks. */
+  readonly summary: string;
+  /** Flags this kind can raise. The basis of the reachable-biome analysis. */
+  readonly flags: readonly string[];
+  readonly params: readonly CycleParamDef[];
+}
+
+/**
+ * Build a kind's parameter list from its defaults plus a note per parameter.
+ *
+ * The mapped type is the point: it requires an entry for EVERY key of the params
+ * interface, so adding a parameter to `SolarBeamParams` without describing it is a
+ * type error rather than a knob that silently never appears in the UI.
+ */
+function paramDefs<P extends object>(
+  defaults: P,
+  notes: { [K in keyof P & string]: Omit<CycleParamDef, 'name' | 'default'> },
+): readonly CycleParamDef[] {
+  return (Object.keys(notes) as (keyof P & string)[]).map((name) => ({
+    name,
+    ...notes[name],
+    default: defaults[name] as number | boolean,
+  }));
+}
+
+const DAYS = 'days';
+const COLS = 'columns';
+const ROWS = 'rows';
+
+export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
+  {
+    kind: 'solarbeam',
+    label: 'the cleansing sweep',
+    summary:
+      'Drags a band of scorching heat across every column of the world, then goes ' +
+      'dormant until the next purge. Its two knobs are not interchangeable: transit is ' +
+      'DWELL TIME (how long one tile bakes) and cycle is RECOVERY TIME. Dwell time is ' +
+      'what sterilises — on a five-cycle world a 60d transit / 360d cycle beam pushed ' +
+      'the living share down to 2% of the map, and lengthening the cycle to 480d only ' +
+      'recovered it to 8% while shortening the transit to 45d recovered it to a 13% ' +
+      'floor and a 28.4% mean. It is one of only two cycles that opens the melt ' +
+      'chemistry: without a beam or volcanism there is no route to lava, ash, basalt ' +
+      'or fertile soil.',
+    flags: ['beam', 'focus'],
+    params: paramDefs(SOLAR_BEAM_DEFAULTS, {
+      transitDays: {
+        label: 'transit', type: 'number', min: 1, max: 2000, unit: DAYS,
+        note: 'Days to cross the world once. This is SEVERITY — how long one tile bakes. 120d sterilises.',
+      },
+      cycleDays: {
+        label: 'cycle', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Days from one purge to the next. This is RECOVERY TIME; between purges the beam is dormant and costs nothing.',
+      },
+      widthCols: {
+        label: 'band width', type: 'number', min: 1, max: 512, unit: COLS,
+        note: 'Width of the scorching band.',
+      },
+      heat: {
+        label: 'band heat', type: 'number', min: 0, max: 300,
+        note: 'Heat added across the whole band. Validated at +70; do not raise casually.',
+      },
+      focusCols: {
+        label: 'focus width', type: 'number', min: 0, max: 512, unit: COLS,
+        note: 'Width of the melting core. Raises Focus, which is the gate for sand → lava.',
+      },
+      focusHeat: {
+        label: 'focus heat', type: 'number', min: 0, max: 300,
+        note: 'Extra heat inside the core, on top of band heat. Pushes sand past melting.',
+      },
+      direction: {
+        label: 'direction', type: 'choice', choices: [1, -1],
+        note: 'Direction of travel. The maths is symmetric; -1 simply sweeps the other way.',
+      },
+      phaseDays: {
+        label: 'phase', type: 'number', min: 0, max: 5000, unit: DAYS,
+        note: 'Day the first purge begins. Two beams on one world can be out of phase.',
+      },
+    }),
+  },
+  {
+    kind: 'seasons',
+    label: 'the turning year',
+    summary:
+      'A slow global heat swing, and per unit of cost the most valuable cycle in the ' +
+      'set: it makes every threshold in the ruleset breathe, so a tile parked just ' +
+      'below the forest moisture cut-off crosses it every year instead of never. Most ' +
+      'of its effect arrives through heat rather than the explicit rain term, because ' +
+      'heat is a multiplicative decay on moisture retention — a hot season dries ' +
+      'continental interiors on its own, bounded and geographically shaped. The polar ' +
+      'amplitude is load-bearing at 22: at 9 the cold-band sea never came within 10 ' +
+      'degrees of the ice-thaw threshold and an eighth of the world froze permanently. ' +
+      'Rain amplitude is the opposite — it is tiny on purpose, and at 10 the desert ' +
+      'belt vanished for half of every year (land moisture swinging 2.4–99.9, against ' +
+      '25–99 at 4).',
+    flags: ['heatwave', 'freeze', 'storm', 'drought'],
+    params: paramDefs(SEASONS_DEFAULTS, {
+      periodDays: {
+        label: 'year length', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Length of one full year.',
+      },
+      heatAmplitude: {
+        label: 'heat swing', type: 'number', min: 0, max: 100,
+        note: 'Swing at the COLD BAND, about half of it at mid-latitudes. 22 is what makes ice form and thaw both reachable.',
+      },
+      moistureAmplitude: {
+        label: 'rain swing', type: 'number', min: 0, max: 40,
+        note: '★ Tiny on purpose. An additive push on a diffusion target with 0.9998 retention, so its steady-state gain is ~1/(1-r). At 10 the desert belt disappears.',
+      },
+      moistureLagQuarters: {
+        label: 'rain lag', type: 'number', min: 0, max: 4, unit: 'quarter-years',
+        note: 'Quarter-turns the wet season lags the hot one. 1 = late-summer monsoon, 2 = wet winters.',
+      },
+      latitudeWeighted: {
+        label: 'latitude weighted', type: 'boolean',
+        note: 'On: flat at the hot band, savage at the cold band. Off: uniform, which suits an airless or tide-locked world.',
+      },
+      extremeThreshold: {
+        label: 'extreme threshold', type: 'number', min: 0, max: 1,
+        note: 'Fraction of the swing past which heatwave / freeze / storm / drought are raised.',
+      },
+      extremeMinWeight: {
+        label: 'extreme floor', type: 'number', min: 0, max: 1,
+        note: 'Latitude weight below which no NAMED thermal season fires. Seasonality in temperature is a latitude phenomenon; it does not gate rain.',
+      },
+      wetWeightFloor: {
+        label: 'tropical rain floor', type: 'number', min: 0, max: 1,
+        note: 'Floor under the rain weight, independent of latitude. 0 leaves the tropics with no seasons at all — which made badlands a mid-latitude biome by accident.',
+      },
+      phaseDays: {
+        label: 'phase', type: 'number', min: 0, max: 5000, unit: DAYS,
+        note: 'Day of peak heat. Offsets one world’s calendar from another’s.',
+      },
+    }),
+  },
+  {
+    kind: 'tectonics',
+    label: 'the shifting deeps',
+    summary:
+      'Permanent fault lines with quakes rupturing along them on a memoryless ' +
+      'schedule. This is the ONLY route to mountain: a world without tectonics has no ' +
+      'path to mountain at all, and the granite / silver / skyquartz material family ' +
+      'does not exist in it. It is also glass’s most important exit — glass shatters ' +
+      'back to sand under a quake, which is what turns a purge scar from a graveyard ' +
+      'into an intermediate state (beam makes glass, quake makes sand, water makes ' +
+      'soil, soil makes forest). Ridge width decides whether the world gets ranges or ' +
+      'seams: at 2 columns the theoretical ceiling was ~1% of a 240-column map, ' +
+      'measured 0.13–0.45%, and mountain materials were unobtainable in all 96 sampled ' +
+      'regions.',
+    flags: ['quake', 'uplift'],
+    params: paramDefs(TECTONICS_DEFAULTS, {
+      faults: {
+        label: 'faults', type: 'integer', min: 0, max: 64,
+        note: 'Fault lines crossing the world. Permanent geography; quakes are events along them.',
+      },
+      meanIntervalDays: {
+        label: 'mean interval', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Mean days between quakes ON ONE FAULT. More faults means more quakes overall.',
+      },
+      durationDays: {
+        label: 'rupture length', type: 'number', min: 1, max: 2000, unit: DAYS,
+        note: 'Days a quake sequence rumbles for. Any length: the scheduler looks back however many epochs it takes.',
+      },
+      shakeCols: {
+        label: 'shake half-width', type: 'number', min: 0, max: 256, unit: COLS,
+        note: 'Half-width of the shaken band either side of the fault.',
+      },
+      ridgeCols: {
+        label: 'ridge half-width', type: 'number', min: 0, max: 256, unit: COLS,
+        note: 'Half-width of the ground that can RISE. Must be ≤ shake half-width. This is the parameter that decides whether a world has mountains.',
+      },
+      reachRows: {
+        label: 'rupture reach', type: 'number', min: 1, max: 512, unit: ROWS,
+        note: 'Half-length of the rupture at magnitude 1, along the fault.',
+      },
+      upliftThreshold: {
+        label: 'uplift threshold', type: 'number', min: 0, max: 1,
+        note: 'Magnitude needed to lift ground AT the fault; the requirement doubles by the ridge margin, so ranges taper instead of ending in a cliff.',
+      },
+    }),
+  },
+  {
+    kind: 'volcanism',
+    label: 'the fire below',
+    summary:
+      'Vents that erupt, lava that cools, ash that settles. The cycle that most ' +
+      'directly makes a world MORE alive rather than less, because its output is ' +
+      'fertile: lava cools to basalt when dry and to soil when wet, ash settles to ' +
+      'soil above moisture 38, and soil becomes grassland in weeks. Size it from ' +
+      'throughput, not taste — standing share is production rate times dwell time, and ' +
+      'the first pass (5 vents, 200d interval, 6d eruption, 3.5-tile lava radius) ' +
+      'measured 0.02% lava and 0.01% soil on a preset whose entire identity is ' +
+      'volcanism. The defaults below put ~0.6% of the world under ashfall at any ' +
+      'moment, which is what makes basalt and soil real provinces rather than rounding ' +
+      'errors. Along with the beam it is one of only two routes to lava, ash, basalt ' +
+      'and fertile soil.',
+    flags: ['eruption', 'focus', 'ashfall'],
+    params: paramDefs(VOLCANISM_DEFAULTS, {
+      vents: {
+        label: 'vents', type: 'integer', min: 0, max: 256,
+        note: 'Vents scattered across the world. Fixed sites; eruptions are events at them.',
+      },
+      meanIntervalDays: {
+        label: 'mean interval', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Mean days between eruptions AT ONE VENT.',
+      },
+      durationDays: {
+        label: 'eruption length', type: 'number', min: 1, max: 2000, unit: DAYS,
+        note: 'How long an eruption runs. Half of what sets lava’s standing share.',
+      },
+      lavaRadius: {
+        label: 'lava radius', type: 'number', min: 0, max: 128, unit: 'tiles',
+        note: 'Radius of the lava field at magnitude 1. Raises Focus and Eruption.',
+      },
+      ashRadius: {
+        label: 'ash radius', type: 'number', min: 0, max: 256, unit: 'tiles',
+        note: 'Radius of the ash plume. The plume is what produces soil, so this is the fertility dial.',
+      },
+      ventHeat: {
+        label: 'vent heat', type: 'number', min: 0, max: 400,
+        note: 'Heat at the vent mouth. Must clear the melting point on its own. Safe to scale where albedo is not: a vent cannot amplify itself.',
+      },
+      plumeHeat: {
+        label: 'plume heat', type: 'number', min: 0, max: 100,
+        note: 'Heat at the edge of the ash plume.',
+      },
+    }),
+  },
+  {
+    kind: 'monsoon',
+    label: 'the rains',
+    summary:
+      'A rain front that migrates across latitudes — deliberately the row-wise ' +
+      'counterpart to the beam’s column-wise sweep, so two fronts on perpendicular ' +
+      'axes give the map a two-dimensional weather history instead of banding. ' +
+      'Mechanically it is the counterweight to desertification: the albedo feedback is ' +
+      'capped at +1.2 because it self-amplifies, and a monsoon is an un-amplifiable ' +
+      'push in the opposite direction, so a strongly monsooned world can safely carry ' +
+      'a harsher beam. Travel defaults to the whole torus for a measured reason: at ' +
+      'half the world, 56 of 144 rows were never rained on once across 10 game-years. ' +
+      'Keep the moisture term small — it pushes a diffusion target whose retention is ' +
+      '0.9998, and at the 26 it originally shipped with a monsoon did not water a ' +
+      'region, it flooded the planet.',
+    flags: ['storm'],
+    params: paramDefs(MONSOON_DEFAULTS, {
+      periodDays: {
+        label: 'period', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Days between one monsoon and the next.',
+      },
+      transitDays: {
+        label: 'transit', type: 'number', min: 1, max: 2000, unit: DAYS,
+        note: 'Days the front spends crossing. The rest of the period is dry.',
+      },
+      startRow: {
+        label: 'start row', type: 'integer', min: 0, max: 4096,
+        note: 'Row the front starts from.',
+      },
+      travelRows: {
+        label: 'travel', type: 'number', min: 0, max: 4096, unit: ROWS,
+        note: '0 means the whole torus, resolved at bind time. Anything less leaves rows permanently outside the rain cycle.',
+      },
+      bandRows: {
+        label: 'band half-height', type: 'number', min: 1, max: 512, unit: ROWS,
+        note: 'Half-height of the rain band.',
+      },
+      moisture: {
+        label: 'moisture', type: 'number', min: 0, max: 60,
+        note: '★ Small for the same reason the seasonal rain swing is: additive push on a 0.9998-retention diffusion target. At 26 it saturates every land tile the band crosses.',
+      },
+      heatDrop: {
+        label: 'cloud cooling', type: 'number', min: 0, max: 60,
+        note: 'Heat removed under cloud cover. Half the monsoon’s real channel — cooler ground holds its moisture — and inherently bounded, since retention cannot exceed 1.',
+      },
+      stormThreshold: {
+        label: 'storm threshold', type: 'number', min: 0, max: 1,
+        note: 'Fraction of peak moisture past which Storm is raised.',
+      },
+      phaseDays: {
+        label: 'phase', type: 'number', min: 0, max: 5000, unit: DAYS,
+        note: 'Offsets the front. Two monsoons out of phase is a legitimate world.',
+      },
+    }),
+  },
+];
+
+const CATALOGUE_BY_KIND: ReadonlyMap<string, CycleCatalogueEntry> = new Map(
+  CYCLE_CATALOGUE.map((e) => [e.kind, e]),
+);
+
+/** The catalogue entry for a kind. Throws on an unknown kind, like `makeCycle`. */
+export function cycleCatalogueEntry(kind: string): CycleCatalogueEntry {
+  const entry = CATALOGUE_BY_KIND.get(kind);
+  if (entry === undefined) throw new Error(`Unknown cycle kind: ${kind}`);
+  return entry;
+}
+
+/** Kinds a world's cycles are made of. The input to the reachability analysis. */
+export const CYCLE_KINDS: readonly string[] = CYCLE_CATALOGUE.map((e) => e.kind);
 
 // ===========================================================================
 // Configuration — what a Game Master actually writes

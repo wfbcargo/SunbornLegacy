@@ -32,6 +32,17 @@ allocation-heavy code.
 - Comments explain *why*, especially where a value was calibrated by measurement. The
   existing comments citing SIMULATION.md findings are load-bearing — do not strip them.
 - Thresholds are named exported constants (`ALIVE_MIN_CHURN`), never inline magic numbers.
+- **Defaults are derived, never retyped.** Anything that has to restate a default — the cycle
+  catalogue, a UI, a doc table — reads it from the `*_DEFAULTS` constant the constructor uses.
+  `paramDefs()` in `cycles.ts` takes a mapped type over the params interface, so adding a
+  parameter without describing it is a type error rather than a knob that never appears.
+- **User-facing text about the simulator states what was measured.** The cycle summaries and
+  parameter notes are prose, but every consequence in them came out of a real run and most were
+  mined from JSDoc where nobody could see them (R-003). Descriptions are not flavour text: a
+  GM choosing a cycle set is making a difficulty decision and the numbers are its whole content.
+- **Reject, do not clamp.** Invalid input gets a message that names the constraint
+  ("height must be EVEN, because…"). A silent clamp hands back something the person did not ask
+  for and cannot tell they did not get — see `src/viewer/limits.ts` and decision `0005`.
 
 ## Testing
 There is no test framework. Verification is executable harnesses run via npm scripts

@@ -28,6 +28,14 @@ import {
 
 export const TICKS_PER_DAY = 14_400;
 
+/**
+ * Columns evaluated per sweep step, and therefore the divisor `width` must be a multiple
+ * of: `stepDay()` runs `ceil(width / bandWidth)` steps of exactly `bandWidth` columns, so
+ * any other width re-evaluates the overlap twice a day. Exported so validation derives it
+ * rather than retyping the literal — see `src/viewer/limits.ts` and decision `0005`.
+ */
+export const DEFAULT_BAND_WIDTH = 8;
+
 export interface WorldOptions {
   width: number;
   height: number;
@@ -97,7 +105,7 @@ export class World {
   constructor(opts: WorldOptions) {
     this.grid = new HexTorus(opts.width, opts.height);
     this.seed = opts.seed;
-    this.bandWidth = opts.bandWidth ?? 8;
+    this.bandWidth = opts.bandWidth ?? DEFAULT_BAND_WIDTH;
     this.stepsPerDay = Math.ceil(opts.width / this.bandWidth);
 
     const specs: (CycleSpec | WorldCycle)[] =

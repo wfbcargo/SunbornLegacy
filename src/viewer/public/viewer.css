@@ -26,9 +26,37 @@ html, body {
 
 main {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  /* 380 rather than 320: the composer puts five cycle cards and a parameter grid in
+     here, and at 320 the parameter labels wrapped to two lines each. */
+  grid-template-columns: minmax(0, 1fr) 380px;
   height: 100%;
 }
+
+/* ---- disconnected banner ----------------------------------------------- */
+
+/*
+  The client used to lose its only failure state after startup: `boot()` failure
+  replaced the page, but a failed REFRESH just console.error'd every 500ms while the
+  panel sat there showing a world that had stopped existing, and Play did nothing.
+  This is that state made visible. It matters more now that Regenerate can change the
+  world's size, because that is exactly when a server restart is likely.
+*/
+/* Fixed rather than a grid row, so appearing and disappearing cannot reflow the map. */
+#offline {
+  position: fixed;
+  z-index: 10;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 6px 14px;
+  font-size: 11px;
+  color: #14161b;
+  background: var(--dead);
+  letter-spacing: 0.02em;
+}
+
+#offline b { text-transform: uppercase; letter-spacing: 0.14em; }
+#offline code { background: #0003; padding: 0 4px; border-radius: 2px; }
 
 /* ---- stage ------------------------------------------------------------- */
 
@@ -266,3 +294,118 @@ input[type="number"], select {
 .legend u { margin-left: auto; text-decoration: none; color: var(--faint); font-variant-numeric: tabular-nums; }
 
 .footnote { margin-top: 22px; font-size: 10px; color: var(--faint); line-height: 1.6; }
+
+/* ---- composer ---------------------------------------------------------- */
+
+.tag {
+  float: right;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+  text-transform: none;
+}
+
+.hint { margin: 6px 0 0; font-size: 10px; color: var(--faint); line-height: 1.5; }
+
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.cycle {
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: #171a20;
+  margin-bottom: 5px;
+}
+
+.cycle > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.cycle > summary::-webkit-details-marker { display: none; }
+.cycle > summary::before { content: '▸'; color: var(--faint); font-size: 9px; }
+.cycle[open] > summary::before { content: '▾'; }
+.cycle > summary:hover { background: #1c202880; }
+.cycle-kind { color: var(--ink); }
+.cycle-key { color: var(--faint); font-size: 10px; }
+.cycle-label { color: var(--dim); font-size: 10px; font-style: italic; margin-left: auto; }
+
+.cycle-body { padding: 2px 8px 10px; border-top: 1px solid var(--line); }
+
+.cycle-summary {
+  margin: 8px 0;
+  font-size: 10px;
+  line-height: 1.65;
+  color: var(--dim);
+}
+
+.cycle-flags { margin: 0 0 8px; font-size: 9px; color: var(--faint); letter-spacing: 0.06em; }
+.cycle-flags i { font-style: normal; color: var(--accent); }
+
+.params { display: grid; gap: 7px; }
+
+.param { display: grid; grid-template-columns: 1fr 74px; align-items: center; gap: 3px 8px; }
+.param > span { font-size: 10px; color: var(--dim); }
+.param > span u { text-decoration: none; color: var(--faint); }
+.param input[type="number"], .param select, .param input[type="text"] { padding: 3px 5px; font-size: 11px; }
+.param input[type="checkbox"] { justify-self: end; accent-color: var(--accent); }
+.param-note { grid-column: 1 / -1; font-size: 9px; line-height: 1.5; color: var(--faint); }
+.param.changed > span { color: var(--accent); }
+
+.cycle-actions { display: flex; gap: 6px; margin-top: 10px; }
+.cycle-actions button { font-size: 11px; padding: 4px; }
+
+.add-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.add-row button { flex: 1 1 auto; font-size: 11px; padding: 5px 6px; }
+
+.preset-row { display: flex; gap: 6px; margin-top: 12px; align-items: stretch; }
+.preset-row select { flex: 1; }
+.preset-row button { flex: 0 0 62px; }
+
+.cost {
+  margin: 12px 0 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.cost b { color: var(--ink); font-weight: 600; }
+.cost .warn { color: var(--accent); }
+
+.message {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border-radius: 3px;
+  border: 1px solid #4a2c2c;
+  background: #241616;
+  color: #e79b9b;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.message.ok { border-color: #2c4a30; background: #16241a; color: #93c896; }
+
+/* ---- reachability ------------------------------------------------------ */
+
+#reach { margin-top: 8px; font-size: 10px; color: var(--dim); line-height: 1.6; }
+#reach .none { color: var(--alive); }
+#reach ul { margin: 6px 0 0; padding: 0; list-style: none; }
+
+#reach li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0 3px 8px;
+  border-left: 2px solid var(--line);
+  margin-bottom: 2px;
+}
+
+#reach li i { width: 8px; height: 8px; flex: none; border-radius: 1px; align-self: center; }
+#reach li b { color: var(--ink); font-weight: 600; }
+#reach li span { margin-left: auto; color: var(--faint); font-size: 9px; }
+#reach .caveat { margin-top: 8px; color: var(--faint); font-size: 9px; }

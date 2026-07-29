@@ -11,9 +11,10 @@
  * ROUTES
  *   GET  /                 the page
  *   GET  /viewer.css|.js   its assets
- *   GET  /api/meta         world-invariant data: biome palette, presets, thresholds
+ *   GET  /api/meta         world-invariant data: palette, cycle catalogue, presets, limits
  *   GET  /api/frame        one frame — binary, see encodeFrame
  *   POST /api/control      { action: play|pause|step|speed|reset, ... }
+ *   POST /api/reachability { cycles } — which biomes a cycle set can never make
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -23,8 +24,12 @@ import { BIOMES } from '../sim/biomes.ts';
 import {
   ALIVE_ENTROPY, ALIVE_MAX_DOMINANCE, ALIVE_MIN_BIOMES, ALIVE_MIN_CHURN,
 } from '../sim/report.ts';
-import { CYCLE_PRESETS } from '../sim/cycles.ts';
+import { CYCLE_CATALOGUE, CYCLE_PRESETS, makeCycle, type CycleSpec } from '../sim/cycles.ts';
+import {
+  cachedReachableCore, flagMaskForKinds, reachableCoreSteps, type ReachableCore,
+} from '../sim/reachability.ts';
 import { ansi256ToHex } from './palette.ts';
+import { checkCycles, checkSize, SIZE_LIMITS } from './limits.ts';
 import { CHURN_WARMUP, HISTORY_DAYS, MAX_SPEED, MIN_SPEED, ViewerSession } from './session.ts';
 
 // ---------------------------------------------------------------------------
@@ -43,11 +48,32 @@ function argStr(name: string, fallback: string): string {
 }
 
 const PORT = arg('port', 4173);
+const START_PRESET = argStr('cycles', 'crucible');
+const START_CYCLES = CYCLE_PRESETS[START_PRESET];
+if (START_CYCLES === undefined) {
+  console.error(
+    `\n  Unknown cycle preset "${START_PRESET}". Known: ${Object.keys(CYCLE_PRESETS).join(', ')}\n`,
+  );
+  process.exit(1);
+}
+
+const START_WIDTH = arg('width', 240);
+const START_HEIGHT = arg('height', 144);
+// The same check the UI applies, applied to the flags too. A viewer started at
+// `--height 143` used to die inside HexTorus with a stack trace; the constraint is the
+// same either way, so say it the same way.
+const startSizeError = checkSize(START_WIDTH, START_HEIGHT);
+if (startSizeError !== null) {
+  console.error(`\n  ${START_WIDTH}×${START_HEIGHT} is not a legal world.\n  ${startSizeError}\n`);
+  process.exit(1);
+}
+
 const session = new ViewerSession({
-  width: arg('width', 240),
-  height: arg('height', 144),
+  width: START_WIDTH,
+  height: START_HEIGHT,
   seed: arg('seed', 1),
-  preset: argStr('cycles', 'crucible'),
+  cycles: START_CYCLES.map((s) => ({ ...s })),
+  preset: START_PRESET,
 });
 
 // ---------------------------------------------------------------------------
@@ -136,7 +162,25 @@ function meta(): unknown {
     biomes: BIOMES.map((d) => ({
       id: d.id, key: d.key, name: d.name, glyph: d.glyph, hex: ansi256ToHex(d.colour),
     })),
+    // `presets` stays a list of names — it is read by name across this seam and
+    // renaming or retyping it would break the client at runtime with no compile error.
+    // The specs behind those names are ADDED alongside, because the composer has to
+    // load a preset into editable fields rather than just select it.
     presets: Object.keys(CYCLE_PRESETS),
+    presetCycles: CYCLE_PRESETS,
+    /**
+     * Everything that exists to be composed, before any world does.
+     *
+     * `defaultKey` is asked of `makeCycle` rather than written down, because it is the
+     * only authority: a preset that omits `key` gets whatever the constructor's default
+     * is, and a composer that guessed differently would send an explicit key, seed a
+     * different RNG stream, and quietly build a different world from the same preset.
+     */
+    cycleCatalogue: CYCLE_CATALOGUE.map((e) => ({
+      ...e,
+      defaultKey: makeCycle({ kind: e.kind } as CycleSpec).key,
+    })),
+    limits: SIZE_LIMITS,
     thresholds: {
       entropy: ALIVE_ENTROPY,
       dominance: ALIVE_MAX_DOMINANCE,
@@ -155,6 +199,9 @@ interface ControlBody {
   days?: number;
   seed?: number;
   preset?: string;
+  width?: number;
+  height?: number;
+  cycles?: CycleSpec[];
 }
 
 function control(body: ControlBody): { ok: boolean; error?: string } {
@@ -175,16 +222,108 @@ function control(body: ControlBody): { ok: boolean; error?: string } {
       session.setSpeed(Number(body.speed));
       return { ok: true };
     case 'reset': {
-      const preset = body.preset;
-      if (preset !== undefined && CYCLE_PRESETS[preset] === undefined) {
-        return { ok: false, error: `Unknown cycle preset: ${preset}` };
+      // Everything is validated BEFORE anything is applied, and every rejection carries
+      // the constraint rather than a status code. A silent clamp here would hand back a
+      // world nobody asked for, and the person cannot tell the difference by looking.
+      const width = body.width ?? session.width;
+      const height = body.height ?? session.height;
+      const sizeError = checkSize(width, height);
+      if (sizeError !== null) return { ok: false, error: sizeError };
+
+      if (body.cycles !== undefined) {
+        const cycleError = checkCycles(body.cycles);
+        if (cycleError !== null) return { ok: false, error: cycleError };
       }
-      session.reset({ seed: body.seed, preset });
+      if (body.seed !== undefined && !Number.isFinite(body.seed)) {
+        return { ok: false, error: 'Seed must be a finite number.' };
+      }
+
+      session.reset({
+        seed: body.seed,
+        preset: body.preset,
+        width,
+        height,
+        cycles: body.cycles,
+      });
       return { ok: true };
     }
     default:
       return { ok: false, error: `Unknown action: ${String(body.action)}` };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reachability — which biomes a cycle set can never make
+// ---------------------------------------------------------------------------
+
+/**
+ * The analysis is expensive and the answer is worth waiting for, so this route never
+ * blocks: it returns what it has and says whether it is finished.
+ *
+ * MEASURED cost of one uncached cycle set (160 rules): 0.16 s for all five kinds, 4.7 s
+ * for none, 30.8 s for seasons + monsoon + tectonics — the restricted worlds are the
+ * expensive ones, because a rule that CANNOT fire has to exhaust the whole probe space
+ * before it can be ruled out. Thirty seconds of synchronous work would stop the frame
+ * route dead, so the generator is driven a rule at a time with a yield to the event loop
+ * between each, and the client polls. Results are cached by flag vocabulary, so the
+ * second question about the same cycle kinds is free.
+ */
+interface Pending {
+  steps: Generator<{ done: number; total: number }, ReachableCore, void>;
+  progress: { done: number; total: number };
+  startedAt: number;
+}
+
+const pending = new Map<number, Pending>();
+
+function pump(mask: number, job: Pending): void {
+  // One rule per macrotask. A single rule costs at most ~800 ms on this ruleset, which
+  // is the worst hiccup the poll loop can see; the alternative — a batch per tick — buys
+  // nothing, because the total is dominated by the sweep either way.
+  setImmediate(() => {
+    const next = job.steps.next();
+    if (next.done === true) {
+      pending.delete(mask);
+      console.log(
+        `  reachability: ${next.value.core.length}/${BIOMES.length} biomes in the core ` +
+          `after ${((Date.now() - job.startedAt) / 1000).toFixed(1)}s`,
+      );
+      return;
+    }
+    job.progress = next.value;
+    pump(mask, job);
+  });
+}
+
+function reachability(body: { cycles?: CycleSpec[] }): {
+  ok: boolean;
+  error?: string;
+  ready?: boolean;
+  progress?: { done: number; total: number };
+  core?: ReachableCore;
+  totalBiomes?: number;
+} {
+  const cycles = body.cycles ?? [];
+  const error = checkCycles(cycles);
+  if (error !== null) return { ok: false, error };
+
+  const mask = flagMaskForKinds(cycles.map((c) => c.kind));
+  const cached = cachedReachableCore(mask);
+  if (cached !== undefined) {
+    return { ok: true, ready: true, core: cached, totalBiomes: BIOMES.length };
+  }
+
+  let job = pending.get(mask);
+  if (job === undefined) {
+    job = {
+      steps: reachableCoreSteps(mask),
+      progress: { done: 0, total: 0 },
+      startedAt: Date.now(),
+    };
+    pending.set(mask, job);
+    pump(mask, job);
+  }
+  return { ok: true, ready: false, progress: job.progress, totalBiomes: BIOMES.length };
 }
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -208,6 +347,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 
   if (req.method === 'POST' && url === '/api/control') {
     const result = control((await readBody(req)) as ControlBody);
+    sendJson(res, result, result.ok ? 200 : 400);
+    return;
+  }
+
+  if (req.method === 'POST' && url === '/api/reachability') {
+    const result = reachability((await readBody(req)) as { cycles?: CycleSpec[] });
     sendJson(res, result, result.ok ? 200 : 400);
     return;
   }
@@ -238,8 +383,11 @@ const server = createServer((req, res) => {
 
 // R-009: localhost only. Not a host, not 0.0.0.0, not configurable.
 server.listen(PORT, '127.0.0.1', () => {
-  const { width, height, seed, preset } = session;
+  const { width, height, seed, preset, cycles } = session;
   console.log(`\n  Sunborn Legacy — world viewer`);
-  console.log(`  ${width}×${height} torus · seed ${seed} · cycles ${preset}`);
+  console.log(
+    `  ${width}×${height} torus · ${(width * height).toLocaleString()} tiles · seed ${seed} · ` +
+      `cycles ${preset} (${cycles.length})`,
+  );
   console.log(`\n  http://127.0.0.1:${PORT}\n`);
 });

@@ -55,3 +55,42 @@ Non-obvious pitfalls. One line per entry. Things that bit us once.
 - **The typecheck gate found nothing on the day it was added.** All 94 errors from the first
   `tsc --noEmit` were missing host globals; there were zero substantive type errors. Its value
   is entirely prospective — do not read "94 errors" as "94 bugs fixed".
+- **A world's width must be a multiple of `bandWidth` (8), or time runs fast in a drifting
+  band.** `stepDay()` runs `ceil(width/8)` steps of exactly 8 columns, so any other width makes
+  the day's last step overlap its first. Measured with an observer cycle: width 250 evaluates
+  six columns twice a day (1.024 evals/column/day), width 100 evaluates four twice (1.040).
+  **Nothing crashes and no output shows it.** Every width in the repo happens to divide by 8.
+  8 is only the *default*: `bandWidth` is a `WorldOptions` knob, so the true rule is "a
+  multiple of the world's `bandWidth`" — validation derives it from `DEFAULT_BAND_WIDTH`
+  rather than retyping 8. **The check lives in `src/viewer/limits.ts`, so it guards the
+  viewer only** — `npm run sim -- --width 250` still silently builds the fast-ageing world.
+  The defect is in `World.stepDay`; a sim-side fix moves the golden hashes (R-010).
+  `checkSize` rejects the rest. Decision `0005`.
+- **Height must be even and `HexTorus` throws if it is not** — odd-r parity breaks where the
+  torus stitches its last row to its first. Validate before constructing: `ViewerSession.reset`
+  now builds into a local and commits only on success, because assigning `height` and *then*
+  throwing left the session reporting a height its world did not have, and the client slices
+  the frame's byte planes by exactly that number.
+- **Never import from `src/sim/invariants.ts`.** It is a script: eight checks run at module
+  scope and it calls `process.exit`. Importing it to reuse a function would run a ~75-second
+  test suite and then kill the importing process. The reusable half lives in
+  `src/sim/reachability.ts`.
+- **Reachability is KIND-level, not parameter-level.** `reachableCore` restricts the ruleset to
+  the flags a cycle *kind* can raise, so `seasons` counts as a source of Freeze even at heat
+  amplitude 0. The honest reading: **"unreachable" is a hard fact, "reachable" is a
+  possibility.** Do not upgrade the second into a promise.
+- **The reachability sweep is slowest for the emptiest worlds.** Cost is (unsatisfiable rules ×
+  admitted flag combinations), and a rule that *can* fire exits on its first probe while one
+  that cannot must exhaust 22×22 neighbour pairs × 7 water counts × 45 heats × 21 moistures per
+  combination. Measured: all five kinds **0.2 s**, no cycles **4.7 s**, seasons + monsoon +
+  tectonics **30.8 s**. Cached per flag mask, so it is paid once per distinct vocabulary.
+- **Do not put prose in the frame header.** It rides along up to 15 times a second: adding each
+  cycle's `describe()` (with its `summary`) took the header from ~600 bytes to **5,037** for
+  four cycles. The client gets summaries once from `/api/meta` and the header carries only the
+  specs.
+- **Omitting a cycle's `key` is not the same as sending its default.** `makeCycle` defaults the
+  solarbeam key to `beam`, not `solarbeam`, and the key seeds the cycle's RNG stream — so a UI
+  that "helpfully" sends an explicit key builds a *different world* from the same preset:
+  different fault lines, vents and phase. The composer narrows a spec back down (omitting the
+  key when it equals the kind's default, omitting parameters equal to theirs), and it reads that
+  default from `makeCycle` itself via `/api/meta` rather than writing it down twice.

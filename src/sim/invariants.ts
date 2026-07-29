@@ -42,10 +42,15 @@
  */
 
 import {
-  ACKNOWLEDGED_EDGE_OVERLAPS, BIOME_COUNT, BIOMES, Biome, RULES,
-  type Rule, type TileContext,
+  ACKNOWLEDGED_EDGE_OVERLAPS, BIOME_COUNT, BIOMES, Biome, RULES, type Rule,
 } from './biomes.ts';
-import { CYCLE_FLAG_NAMES, CYCLE_PRESETS, CycleFlag, makeCycle } from './cycles.ts';
+import { CYCLE_PRESETS } from './cycles.ts';
+// The graph and satisfiability machinery lives in `reachability.ts` so that the viewer
+// can run the same analysis on an arbitrary composed cycle set. It cannot import THIS
+// file: everything here executes at module scope and exits the process.
+import {
+  buildAdjacency, flagMaskForKinds, reachableCore, satisfiable, tarjan,
+} from './reachability.ts';
 import { World } from './world.ts';
 
 const COLOUR = process.env.NO_COLOR === undefined && process.env.TERM !== 'dumb';
@@ -65,79 +70,6 @@ function section(title: string): void {
 // ===========================================================================
 // The graph
 // ===========================================================================
-
-/** Adjacency as sets of target biomes, optionally restricted to a live rule subset. */
-function buildAdjacency(rules: readonly Rule[]): Set<Biome>[] {
-  const adj: Set<Biome>[] = Array.from({ length: BIOME_COUNT }, () => new Set<Biome>());
-  for (const r of rules) if (r.from !== r.to) adj[r.from]!.add(r.to);
-  return adj;
-}
-
-/**
- * Tarjan's strongly connected components, iterative.
- *
- * Recursive Tarjan is shorter, but this runs inside a check that is supposed to be
- * unconditionally safe to call on any ruleset, including a pathological one, and an
- * invariant checker that can stack-overflow is not an invariant checker.
- */
-function tarjan(adj: readonly Set<Biome>[]): Biome[][] {
-  const n = adj.length;
-  const index = new Int32Array(n).fill(-1);
-  const low = new Int32Array(n);
-  const onStack = new Uint8Array(n);
-  const stack: number[] = [];
-  const out: Biome[][] = [];
-  let counter = 0;
-
-  for (let root = 0; root < n; root++) {
-    if (index[root] !== -1) continue;
-    // frame = [node, iterator position over its successors]
-    const work: [number, number][] = [[root, 0]];
-    const succ: Biome[][] = [];
-    succ[root] = [...adj[root]!];
-    index[root] = low[root] = counter++;
-    stack.push(root);
-    onStack[root] = 1;
-
-    while (work.length > 0) {
-      const frame = work[work.length - 1]!;
-      const v = frame[0];
-      const kids = succ[v]!;
-
-      if (frame[1] < kids.length) {
-        const w = kids[frame[1]!]!;
-        frame[1]++;
-        if (index[w] === -1) {
-          index[w] = low[w] = counter++;
-          stack.push(w);
-          onStack[w] = 1;
-          succ[w] = [...adj[w]!];
-          work.push([w, 0]);
-        } else if (onStack[w]) {
-          if (index[w]! < low[v]!) low[v] = index[w]!;
-        }
-        continue;
-      }
-
-      work.pop();
-      if (work.length > 0) {
-        const parent = work[work.length - 1]![0];
-        if (low[v]! < low[parent]!) low[parent] = low[v]!;
-      }
-      if (low[v] === index[v]) {
-        const comp: Biome[] = [];
-        for (;;) {
-          const w = stack.pop()!;
-          onStack[w] = 0;
-          comp.push(w as Biome);
-          if (w === v) break;
-        }
-        out.push(comp);
-      }
-    }
-  }
-  return out;
-}
 
 /** BFS distances from one node. Infinity where unreachable. */
 function bfs(adj: readonly Set<Biome>[], from: Biome): number[] {
@@ -178,114 +110,6 @@ function shortestPath(adj: readonly Set<Biome>[], from: Biome, to: Biome): Biome
     if (v === from) break;
   }
   return path.reverse();
-}
-
-// ===========================================================================
-// Satisfiability: can this rule ever fire at all?
-// ===========================================================================
-
-/**
- * Flag combinations worth probing.
- *
- * Not the full 2^10 power set — the ruleset only ever tests a handful of combinations,
- * and the ones that matter are the ones a real cycle can produce together. Focus never
- * appears without Beam or Eruption, and Uplift never appears without Quake, because
- * that is how cycles.ts raises them.
- */
-const FLAG_COMBOS: readonly number[] = [
-  0,
-  CycleFlag.Beam,
-  CycleFlag.Beam | CycleFlag.Focus,
-  CycleFlag.Quake,
-  CycleFlag.Quake | CycleFlag.Uplift,
-  CycleFlag.Eruption | CycleFlag.Focus,
-  CycleFlag.Ashfall,
-  CycleFlag.Ashfall | CycleFlag.Eruption,
-  CycleFlag.Storm,
-  CycleFlag.Heatwave,
-  CycleFlag.Heatwave | CycleFlag.Drought,
-  CycleFlag.Freeze,
-  CycleFlag.Drought,
-  CycleFlag.Beam | CycleFlag.Focus | CycleFlag.Quake,
-];
-
-const HEATS: number[] = [];
-for (let h = -20; h <= 200; h += 5) HEATS.push(h);
-const MOISTS: number[] = [];
-for (let m = 0; m <= 100; m += 5) MOISTS.push(m);
-
-const scratchCounts = new Int32Array(BIOME_COUNT);
-
-function makeContext(
-  biome: Biome,
-  heat: number,
-  moisture: number,
-  waterNeighbours: number,
-  probeA: Biome,
-  probeB: Biome,
-  flags: number,
-): TileContext {
-  scratchCounts.fill(0);
-  // Water neighbours are modelled as ocean, which is the common case; frozen sea and
-  // shallows differ only in which counts bucket they land in and both are covered by
-  // sweeping probeA/probeB over every biome.
-  scratchCounts[Biome.Ocean] = waterNeighbours;
-  const land = 6 - waterNeighbours;
-  const a = Math.ceil(land / 2);
-  scratchCounts[probeA]! += a;
-  scratchCounts[probeB]! += land - a;
-  return {
-    biome,
-    heat,
-    moisture,
-    waterNeighbours,
-    neighbourCounts: scratchCounts,
-    flags,
-    underBeam: (flags & CycleFlag.Beam) !== 0,
-  };
-}
-
-/**
- * Does `rule.when` ever return a positive pressure, anywhere in climate x neighbour x
- * flag space? A rule that never can is dead code, and dead code in this file is
- * usually a typo'd threshold rather than an unused feature — an edge the graph is
- * counting on that will never actually fire.
- *
- * `allowedFlags` restricts the probe to what a given world can produce, which is how
- * the per-preset reachable core below is computed.
- */
-function satisfiable(rule: Rule, allowedFlags = -1): boolean {
-  const combos = FLAG_COMBOS.filter((f) => (f & ~allowedFlags) === 0);
-  // Single-composition pass first: it covers every rule in the current set and is
-  // ~22x cheaper. Only rules that fail it pay for the pairwise sweep.
-  for (const probe of BIOMES) {
-    for (const flags of combos) {
-      for (let w = 0; w <= 6; w++) {
-        for (const heat of HEATS) {
-          for (const moisture of MOISTS) {
-            const c = makeContext(rule.from, heat, moisture, w, probe.id, probe.id, flags);
-            if (rule.when(c) > 0) return true;
-          }
-        }
-      }
-    }
-  }
-  for (const pa of BIOMES) {
-    for (const pb of BIOMES) {
-      if (pa.id === pb.id) continue;
-      for (const flags of combos) {
-        for (let w = 0; w <= 6; w++) {
-          for (const heat of HEATS) {
-            for (const moisture of MOISTS) {
-              const c = makeContext(rule.from, heat, moisture, w, pa.id, pb.id, flags);
-              if (rule.when(c) > 0) return true;
-            }
-          }
-        }
-      }
-    }
-  }
-  return false;
 }
 
 // ===========================================================================
@@ -574,23 +398,16 @@ section('required chemistry');
 
 section('reachable core per cycle preset');
 {
-  const flagBit = new Map(CYCLE_FLAG_NAMES.map(([bit, n]) => [n, bit]));
+  // The analysis itself lives in `reachability.ts`, so the viewer's composer can run it
+  // on an arbitrary cycle set and report exactly what this section reports. It is
+  // keyed on cycle KINDS, not on parameters — see that file for what the claim covers.
   console.log(dim('  preset      live edges   SCCs   core   outside the core'));
   for (const [preset, specs] of Object.entries(CYCLE_PRESETS)) {
-    let allowed = 0;
-    for (const spec of specs) {
-      // bind() only needs a grid to exist; describe() is what we are after.
-      const cycle = makeCycle(spec).bind(64, 32, 1);
-      for (const f of cycle.describe().flags) allowed |= flagBit.get(f) ?? 0;
-    }
-    const live = RULES.filter((r) => satisfiable(r, allowed));
-    const sub = buildAdjacency(live);
-    const comps = tarjan(sub);
-    const biggest = comps.reduce((a, b) => (b.length > a.length ? b : a), [] as Biome[]);
-    const outside = BIOMES.filter((d) => !biggest.includes(d.id)).map((d) => d.key);
+    const core = reachableCore(flagMaskForKinds(specs.map((s) => s.kind)));
+    const outside = core.outside.map((o) => o.key);
     console.log(
-      `  ${preset.padEnd(11)} ${String(sub.reduce((n, s) => n + s.size, 0)).padStart(6)}   ` +
-        `${String(comps.length).padStart(4)}   ${String(biggest.length).padStart(2)}/${BIOME_COUNT}   ` +
+      `  ${preset.padEnd(11)} ${String(core.liveEdges).padStart(6)}   ` +
+        `${String(core.componentCount).padStart(4)}   ${String(core.core.length).padStart(2)}/${BIOME_COUNT}   ` +
         dim(outside.length === 0 ? '—' : outside.join(', ')),
     );
   }

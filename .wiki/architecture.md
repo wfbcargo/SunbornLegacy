@@ -16,19 +16,27 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 RuleDef (authored) and Rule (identity attached) are separate types;
 │                 a rule's roll stream comes from its content-derived keyHash (decision 0002)
 ├── cycles.ts     WorldCycle subclasses (SolarBeam, Seasons, Tectonics, Volcanism,
-│                 Monsoon), CycleSpec union, makeCycle(), CYCLE_PRESETS
+│                 Monsoon), CycleSpec union, makeCycle(), CYCLE_PRESETS,
+│                 CYCLE_CATALOGUE (static: kind, label, summary, flags, params+defaults —
+│                 answerable before a world exists, which describe() cannot be)
 ├── world.ts      World — owns biome/moisture arrays, band sweep, stepDay()
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)
 ├── run.ts        CLI entry: argv -> World -> console report
+├── reachability.ts  PURE graph + satisfiability core: buildAdjacency, tarjan,
+│                 satisfiable, reachableCore(flagMask). Shared by invariants.ts and the
+│                 viewer, because invariants.ts cannot be imported (it is a script)
 ├── invariants.ts transition-graph checks (single SCC, reachability, rule-key uniqueness)
 ├── golden.ts     golden-world hash gate — has the simulation drifted?
 ├── sweep.ts      cycle-parameter sweep harness
 └── diagnose.ts   day-by-day trace of one disturbance cycle
 
 src/viewer/       local world viewer — a DEV INSTRUMENT, not a product surface (R-009)
-├── server.ts     node:http on 127.0.0.1 (hardcoded); /api/meta, /api/frame, /api/control;
-│                 static assets served from an allowlist, not a path join
-├── session.ts    owns the World, the playback timer, and a 600-day rolling sample window
+├── server.ts     node:http on 127.0.0.1 (hardcoded); /api/meta, /api/frame, /api/control,
+│                 /api/reachability; static assets from an allowlist, not a path join
+├── session.ts    owns the World, the playback timer, a 600-day rolling sample window, and
+│                 the composed cycle set (specs, not a preset name) + measured ms/day
+├── limits.ts     what a world may BE: size bounds and cycle-spec validation, each with
+│                 the measurement behind it (decision 0005). Rejects, never clamps
 ├── palette.ts    xterm-256 -> RGB, so BiomeDef needs no hex-colour field
 └── public/       plain-JS client (index.html, viewer.css, viewer.js). Deliberately .js,
                   so it sits outside tsc's include: ["src/**/*.ts"] — see conventions.md
@@ -53,13 +61,24 @@ never its array position, so reordering `RULES` changes precedence only (decisio
   I/O (R-007). `run.ts`, `golden.ts`, `sweep.ts`, `diagnose.ts` and `invariants.ts` are
   harnesses — callers, not stepping code.
 - **`src/viewer/` depends on `src/sim/`; the sim never knows the viewer exists.** One-way.
-  The seam is the `World` read surface plus the exports of `report.ts`, `biomes.ts` and
-  `cycles.ts`. Presentation policy stays viewer-side — the 600-day sample window and the
-  ANSI→RGB palette both belong there, not in the sim.
-- **The HTTP seam is name-frozen.** `StabilityVerdict` field names, plus `BiomeDef` fields
-  and `CYCLE_PRESETS` keys, reach the browser verbatim as JSON. The typechecker cannot see
-  across that seam, so renaming one breaks the client at runtime with no compile error.
-  Adding fields is safe; renaming is not.
+  The seam is the `World` read surface plus the exports of `report.ts`, `biomes.ts`,
+  `cycles.ts`, `reachability.ts` and `DEFAULT_BAND_WIDTH` from `world.ts`. Presentation
+  policy stays viewer-side — the 600-day sample window and the ANSI→RGB palette both belong
+  there, not in the sim.
+- **The HTTP seam is name-frozen.** `StabilityVerdict` field names, plus `BiomeDef` fields,
+  `CYCLE_PRESETS` keys, `CycleSpec` parameter names and `CYCLE_CATALOGUE` field names, reach
+  the browser verbatim as JSON. The typechecker cannot see across that seam, so renaming one
+  breaks the client at runtime with no compile error. Adding fields is safe; renaming is not.
+  `presets` (a list of names) was deliberately left alone when the composer needed the specs
+  too — `presetCycles` was added beside it rather than changing its shape.
+- **A world is its cycle SPECS, not a preset name.** `ViewerSession` holds
+  `cycles: CycleSpec[]`; `preset` is a display label ("crucible", or "custom" once the set
+  no longer matches any preset by value) and is never used to rebuild anything. Presets are
+  starting points that populate the composer, not a menu of the worlds that can exist.
+- **Analysis that a UI waits on must yield.** `reachableCore` costs 0.2–31 s depending on the
+  flag vocabulary, so `src/sim/reachability.ts` exposes it as a generator and the server
+  drives it one rule per `setImmediate`, caching by flag mask. Measured while a sweep ran:
+  frames still served in 47–126 ms. A blocking call would have stopped the frame route dead.
 - **Determinism is a boundary, not a nicety.** All randomness derives from `seed` via
   `rollAt`. See R-004, and `gotchas.md` on engine-specific golden hashes.
 
