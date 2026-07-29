@@ -50,52 +50,88 @@ API-first with third-party clients, toroidal hex map, TypeScript end-to-end, fla
 disturbance engine, obedient characters, station/slot settlement, light automated combat.
 
 ### Built
-- `src/sim/` — headless terrain simulator. TypeScript, runs natively on Node 24, no deps.
+- `src/sim/` — headless terrain simulator. TypeScript, runs natively on Node 24, **zero
+  runtime dependencies, no build step.** `typescript` and `@types/node` are devDependencies,
+  type-only and erased at runtime (decision `0004`).
   ```
+  npm run typecheck    # tsc --noEmit — must be green before any merge
   npm run sim          # full run, map + charts + both tests
   npm run sim:check    # transition-graph invariants (single SCC)
+  npm run sim:golden   # golden-world hashes — has the simulation drifted?
   npm run sim:sweep    # cycle parameter sweep
   npm run sim:trace    # day-by-day trace of one disturbance cycle
   ```
+  **Pass options with `--`:** `npm run sim -- --days 1500 --cycles still`. Without it npm
+  eats the flags and you silently get a different preset (see `SIMULATION.md` bug #8).
 
-### Validated — 2026-07-29
-The 22-biome ruleset, general cycle system, and invariant checker were built by a
-multi-agent workflow and have since been **independently verified by running them**:
+### Validated — 2026-07-29, re-measured after the rule re-key
+Rolls used to be keyed on a rule's position in the `RULES` array, so **every world changed
+when that was fixed** and every previously recorded figure was invalidated. Nothing below
+is carried forward; all of it comes from runs made after the fix. 240 × 144, seed 20260729:
 
-- `npm run sim:check` — **all invariants hold.** Single strongly connected component
-  across 22 biomes, all 160 rules satisfiable, every biome escapable without cycles,
-  10 required chemistry edges present.
-- `npm run sim --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.751,
-  churn 3.95%, largest biome 18.3%, 14 biomes above 1%; 0 generic and 0 thin regions
-  with median 18 materials.
-- `npm run sim --days 1500 --cycles still` — **the control correctly FAILS** (entropy
-  0.648, churn 0.04%, flagged as heat death). This is the important one: it proves the
-  test discriminates. The previous thresholds reported both worlds as alive.
+- `npm run typecheck` — **clean.** ⚠️ Read this one honestly: the first `tsc --noEmit` reported
+  94 errors and **every one was a missing Node host global**, so there were **zero substantive
+  type errors** and nothing was fixed — a host environment was configured (`@types/node`).
+  **The gate found nothing today; its entire value is prospective**, catching the next
+  silently-dead flag rather than having caught this one.
+- `npm run sim:check` — **all invariants hold.** 160 rules with 160 unique keys and 160
+  distinct roll streams, single strongly connected component across 22 biomes, all 160
+  rules satisfiable, every biome escapable without cycles, 10 required chemistry edges.
+- `npm run sim:golden` — **2 golden worlds unchanged**, each verified deterministic across
+  two independent builds.
+- `node src/sim/run.ts --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.753,
+  churn 3.92%, largest biome 18.2%, 14 biomes above 1%; 82 habitable regions, 0 generic and
+  0 thin, median 18 materials.
+- `node src/sim/run.ts --days 1500 --cycles still` — **the control correctly FAILS**
+  (entropy 0.647, churn 0.04%, 12 generic and 16 thin regions, flagged as heat death).
+  This is the important one: it proves the test discriminates.
+- `npm run sim` (1200 days, `crucible`) — **both tests pass.** Entropy 0.749, churn 3.58%,
+  largest biome 17.0%, 13 biomes above 1%.
 
-Full numbers and reasoning in `SIMULATION.md`.
+The re-key moved the numbers in the third decimal place and moved **no verdict** — the
+findings were properties of the ruleset, not of its array order. Full numbers and the
+before/after hash comparison in `SIMULATION.md`.
 
 ### Fixed
+**Transition rolls were keyed on array position.** `rollAt(seed, tile, day, r)` used the
+rule's *index* in its bucket, so inserting or moving any rule silently handed every rule
+after it different dice — editing the erosion rules changed what the forests did, and
+nothing reported it. Rule identity is now derived from content. Decision `0002`.
+
+**`npm run sim --days N` ran a different world than it claimed.** npm swallows flags that
+aren't after `--`, and the `sim` script hard-coded `--days 1200` which won anyway on
+`indexOf`. `npm run sim --days 1500 --cycles still` actually ran *crucible at 1200 days* —
+and that exact command was documented here as the evidence for the control failing. Fixed.
+
 **Dead CLI flags in `run.ts`.** `--beam-period` was parsed into a property
 `WorldOptions` no longer declared; Node strips types unchecked, so it silently did
 nothing, and `--beam-transit`/`--beam-cycle` were never parsed at all. Now genuinely
 parsed. (The older recorded numbers were correct *by luck* — the ignored flags meant
 constructor defaults applied, which happened to match the config being claimed.)
+`npm run typecheck` now exists so this class of bug is caught rather than discovered.
 
 ### ⚠️ Test-1 thresholds were recalibrated — know why
-At ~22 biomes, entropy stopped separating living worlds from dead ones: a no-disturbance
-control measured entropy **0.707** against a fully-cycled world's **0.703**, so the
-*frozen* world scored **higher** and both were reported alive. **Churn is now the
-load-bearing metric.** Variety is a snapshot property; being alive is a property of
-motion. Do not "simplify" Test 1 back to entropy alone.
+At ~22 biomes, entropy stopped separating living worlds from dead ones. *(Historical
+measurement, from the ruleset as it stood before the recalibration and not re-run since:* a
+no-disturbance control measured entropy **0.707** against a fully-cycled world's **0.703**,
+so the *frozen* world scored **higher** and both were reported alive.*)*
+
+**Churn is now the load-bearing metric.** Variety is a snapshot property; being alive is a
+property of motion. Do not "simplify" Test 1 back to entropy alone.
+
+The current margins say the same thing, measured today: the control fails on entropy by
+0.003 (0.647 vs a 0.65 threshold) and on churn by a factor of **four** (0.04% vs 0.15%).
+Entropy is still the metric that nearly lets a corpse through.
 
 ---
 
 ## The three findings that shape everything
 
 **1. Disturbance is what keeps a world alive.** A world with no cycles converges to a
-static equilibrium — measured churn 0.29%, with the min–max range of habitable land
-collapsing to a single value. Every cycled world showed 3–5× the churn. The god's
-reshaping is not flavour on top of a living world; it is the mechanism that makes it live.
+static equilibrium — measured churn **0.04%** against a fully-cycled world's **3.92%**,
+roughly two orders of magnitude, with 92.4% of the control's tiles holding no live
+out-rule at all across a watched game-year. The god's reshaping is not flavour on top of a
+living world; it is the mechanism that makes it live.
 
 **2. Exponential progression and a player economy are incompatible.** If power multiplies,
 early materials become worthless and the market collapses to a thin band of the current

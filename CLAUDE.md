@@ -19,17 +19,24 @@ split by `Scope`; pass each sub-agent only its applicable slice. Sub-agents do n
 
 ## Running the project
 
-Node 24, native TypeScript execution, **zero dependencies, no build step**.
+Node 24, native TypeScript execution, **zero runtime dependencies, no build step**.
+(`typescript` and `@types/node` are type-only devDependencies, erased at runtime — decision `0004`.)
 
 ```
-npm run typecheck    # tsc --noEmit — must be green before any merge
+npm run typecheck    # tsc --noEmit — merge gate (R-002)
+npm run sim:golden   # golden-world hashes — merge gate (R-010)
 npm run sim          # full run: map + charts + both liveness tests
 npm run sim:check    # transition-graph invariants (single SCC)
 npm run sim:sweep    # cycle parameter sweep
 npm run sim:trace    # day-by-day trace of one disturbance cycle
+npm run viewer       # local world viewer at http://127.0.0.1:4173
 ```
 
-`npm run sim` takes ~10–30s at default size. Prefer `--days 300` while iterating.
+`npm run sim` takes ~10–30s at default size. Prefer `-- --days 300` while iterating.
+
+⚠️ **Pass flags after `--`.** npm swallows anything else: `npm run sim --days 1500` silently
+runs the default world, and that mistake previously invalidated this repo's own recorded
+evidence. Use `npm run sim -- --days 1500 --cycles still`.
 
 ## Non-negotiables
 

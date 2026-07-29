@@ -5,9 +5,12 @@ agent only the rules that apply to it. Sub-agents do not re-read it.
 
 ## R-001: No dependencies without escalation
 Scope: global
-Added: 2026-07-29 | Source: package.json (zero deps today)
+Added: 2026-07-29 | Amended: 2026-07-29 (decisions/0004) | Source: package.json
 The project runs on Node 24 native TypeScript execution with no build step and no
 runtime dependencies. Adding any npm dependency is a structural decision — escalate.
+**Exempt: type-only devDependencies** (erased at runtime, so they cost neither of the
+properties this rule protects). `typescript` and `@types/node` are approved; a package
+shipping executable code still needs escalation however small.
 
 ## R-002: TypeScript must pass `tsc --noEmit`
 Scope: global
@@ -47,6 +50,12 @@ Added: 2026-07-29 | Source: ARCHITECTURE.md#13 Phase 1
 Simulation modules compute; they do not print, read files, parse argv, or touch the
 network. Presentation belongs to callers (`report.ts`, `run.ts`, the server).
 
+## R-008: Design decisions get written down with their reasoning
+Scope: global
+Added: 2026-07-29 | Source: README.md#working-agreement
+A durable, non-obvious, project-scoped decision becomes a `.wiki/decisions/<NNNN>` entry.
+Superseded reasoning is marked, never deleted.
+
 ## R-009: The viewer is a local dev instrument, never a product surface
 Scope: src/viewer/**
 Added: 2026-07-29 | Source: decisions/0001-in-memory-viewer-before-persistence.md
@@ -54,8 +63,11 @@ It binds to localhost only, has no auth, and deliberately serves whole-world sta
 real API must never expose. Do not add product features, accounts, or public deployment to
 it, and never treat its endpoints as the `/v1/*` contract.
 
-## R-008: Design decisions get written down with their reasoning
+## R-010: `npm run sim:golden` must be green before any merge
 Scope: global
-Added: 2026-07-29 | Source: README.md#working-agreement
-A durable, non-obvious, project-scoped decision becomes a `.wiki/decisions/<NNNN>` entry.
-Superseded reasoning is marked, never deleted.
+Added: 2026-07-29 | Source: decisions/0002-rule-identity-is-derived-from-content.md
+The golden hashes are the tripwire for silent simulation drift. Unlike a type error, a
+failure here may be *correct* — it means the world changed. If the change was intended:
+`--update`, then re-run `npm run sim` and update the numbers in `SIMULATION.md` and
+`README.md` **in the same commit**. Updating the hash alone turns the gate into a rubber
+stamp and is worse than not having it.

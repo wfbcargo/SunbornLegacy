@@ -389,13 +389,20 @@ export class World {
 
     // Evaluate every applicable rule independently. First one to fire wins; the
     // ordering bias is negligible because per-visit probabilities are small.
+    //
+    // ★ THE ROLL IS KEYED ON `rule.keyHash`, NEVER ON `r`.
+    // `r` is the rule's position in its bucket, so keying on it made every rule's dice
+    // a function of the order rules happen to sit in the RULES array: inserting one
+    // renumbered every rule after it and silently changed unrelated outcomes. keyHash
+    // is derived from the rule's own content, so a rule's dice belong to the rule. See
+    // `ruleKey` in biomes.ts.
     const rules = RULES_BY_BIOME[ctx.biome]!;
     for (let r = 0; r < rules.length; r++) {
       const rule = rules[r]!;
       const pressure = rule.when(ctx);
       if (pressure <= 0) continue;
       const p = medianToProbability(rule.medianDays / pressure);
-      if (rollAt(this.seed, i, day, r) < p) {
+      if (rollAt(this.seed, i, day, rule.keyHash) < p) {
         biome[i] = rule.to;
         return;
       }

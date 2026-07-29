@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sunborn Legacy — world viewer</title>
+  <link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+  <main>
+    <section id="stage">
+      <div id="canvas-wrap">
+        <canvas id="map"></canvas>
+      </div>
+      <div id="readout" class="readout empty">hover the map</div>
+    </section>
+
+    <aside id="panel">
+      <header>
+        <h1>Sunborn Legacy</h1>
+        <p class="sub">world viewer &middot; local instrument</p>
+      </header>
+
+      <div class="day-block">
+        <span class="day-label">day</span>
+        <span class="day" id="day">0</span>
+      </div>
+
+      <div class="controls">
+        <button id="play" class="primary">Play</button>
+        <button id="step">Step</button>
+        <button id="step10">+10</button>
+      </div>
+
+      <label class="field">
+        <span class="field-label">speed <b id="speed-value">6</b> days/sec</span>
+        <input type="range" id="speed" min="1" max="60" step="1" value="6">
+      </label>
+
+      <h2>Liveness</h2>
+      <div id="verdict" class="verdict">&mdash;</div>
+
+      <!--
+        Churn first, and larger. R-005: a frozen world can score HIGHER entropy than a
+        living one, so entropy is not the headline health number — motion is.
+      -->
+      <div class="metric headline" id="m-churn">
+        <span class="metric-name">late churn</span>
+        <span class="metric-value" id="churn">&mdash;</span>
+        <span class="metric-note" id="churn-note"></span>
+      </div>
+
+      <div class="metric" id="m-entropy">
+        <span class="metric-name">entropy <i>(tail mean)</i></span>
+        <span class="metric-value" id="entropy">&mdash;</span>
+        <span class="metric-note" id="entropy-note"></span>
+      </div>
+
+      <div class="metric" id="m-dominance">
+        <span class="metric-name">largest biome</span>
+        <span class="metric-value" id="dominance">&mdash;</span>
+        <span class="metric-note" id="dominance-note"></span>
+      </div>
+
+      <div class="metric" id="m-live">
+        <span class="metric-name">biomes above 1%</span>
+        <span class="metric-value" id="live">&mdash;</span>
+        <span class="metric-note" id="live-note"></span>
+      </div>
+
+      <ul class="notes" id="notes"></ul>
+
+      <h2>Composition</h2>
+      <div class="composition" id="composition"></div>
+      <div class="legend" id="legend"></div>
+
+      <h2>World</h2>
+      <label class="field">
+        <span class="field-label">seed</span>
+        <input type="number" id="seed" value="1" step="1">
+      </label>
+      <label class="field">
+        <span class="field-label">cycles</span>
+        <select id="preset"></select>
+      </label>
+      <button id="reset" class="wide">Regenerate</button>
+
+      <h2>View</h2>
+      <label class="field">
+        <span class="field-label">hex size <b id="zoom-value">3</b> px</span>
+        <input type="range" id="zoom" min="2" max="12" step="0.5" value="3">
+      </label>
+
+      <p class="footnote" id="footnote"></p>
+    </aside>
+  </main>
+
+  <script type="module" src="/viewer.js"></script>
+</body>
+</html>

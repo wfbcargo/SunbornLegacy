@@ -30,6 +30,7 @@
  */
 
 import { CycleFlag } from './cycles.ts';
+import { hashString } from './rng.ts';
 
 export const Biome = {
   Ocean: 0,
@@ -180,7 +181,15 @@ export interface TileContext {
   readonly underBeam: boolean;
 }
 
-export interface Rule {
+/**
+ * A transition rule AS WRITTEN. Everything an author types; nothing derived.
+ *
+ * Kept separate from `Rule` so a rule's identity cannot be authored by hand. See
+ * `ruleKey`: the whole point is that the key is a function of the rule's content, so
+ * there is no way to write two rules that claim the same identity by accident, and no
+ * way to change a rule's identity without changing what the rule says.
+ */
+export interface RuleDef {
   readonly from: Biome;
   readonly to: Biome;
   /** Median lifetime in visits. One visit = one solar revolution = one real day. */
@@ -194,6 +203,43 @@ export interface Rule {
    * never hand a biome a second copy of an edge it already has by hand.
    */
   readonly derived?: boolean;
+}
+
+/** A rule with its derived identity attached. This is what the simulation runs on. */
+export interface Rule extends RuleDef {
+  /** Stable content-derived name — see `ruleKey`. Unique; checked in invariants.ts. */
+  readonly key: string;
+  /** `hashString(key)`. The roll stream this rule draws from. */
+  readonly keyHash: number;
+}
+
+/**
+ * A rule's stable identity: `<fromBiome>-><toBiome>:<label>`.
+ *
+ * ★ THIS IS THE FIX FOR THE POSITIONAL-KEYING BUG, and the reason it matters is worth
+ * stating precisely, because the old code looked completely reasonable.
+ *
+ * Every transition roll is `rollAt(worldSeed, tileIndex, day, <rule>)`. That fourth
+ * coordinate used to be the rule's INDEX in its per-biome bucket — which is a function
+ * of the order rules happen to appear in the `RULES` array. So inserting a rule, or
+ * moving one, or adding a biome to a fan-out, silently renumbered every rule after it
+ * and handed them each a different stream of dice. Editing the erosion rules changed
+ * what the forests did. Every world in every recorded measurement shifted for reasons
+ * that had nothing to do with the edit, and nothing anywhere said so.
+ *
+ * Deriving the key from CONTENT makes a rule's dice a property of the rule. Reordering
+ * `RULES` is now a no-op; inserting one perturbs only itself. That is what makes an A/B
+ * comparison between two rulesets mean anything at all.
+ *
+ * `label` is part of the key because from/to alone is not unique — glass has three exits
+ * and bloom has two edges to forest at different medians. That does make the label
+ * load-bearing rather than decorative: RENAMING A RULE RE-KEYS IT and changes the world.
+ * That is the right trade — a rename is a deliberate edit to the rule, where a reorder
+ * is not — but it is a sharp edge, so `invariants.ts` checks the keys are unique and
+ * `golden.ts` fails if any of this shifts without being intended.
+ */
+export function ruleKey(r: RuleDef): string {
+  return `${BIOMES[r.from]!.key}->${BIOMES[r.to]!.key}:${r.label}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +332,7 @@ const SUBSIDABLE: Biome[] = idsWhere(
 );
 
 /** Expand a one-to-many rule template into concrete rules. */
-function fanOut(froms: Biome[], rule: Omit<Rule, 'from' | 'derived'>): Rule[] {
+function fanOut(froms: Biome[], rule: Omit<RuleDef, 'from' | 'derived'>): RuleDef[] {
   return froms.map((from) => ({ ...rule, from, derived: true }));
 }
 
@@ -372,7 +418,15 @@ function wetNeighbours(c: TileContext): number {
 /** Dry land neighbours. The deposition side of the coastline membrane. */
 const landNeighbours = (c: TileContext): number => 6 - c.waterNeighbours;
 
-export const RULES: readonly Rule[] = [
+/**
+ * The ruleset as authored.
+ *
+ * Array ORDER still matters, but only in one narrow way: within a biome's bucket the
+ * first rule to fire wins, so ordering is a precedence choice (see the note below).
+ * It no longer decides which dice each rule rolls — that is `ruleKey` — so reordering
+ * changes precedence and nothing else.
+ */
+const RULE_DEFS: readonly RuleDef[] = [
   // =========================================================================
   // WORLD CYCLES — the disturbance engine.
   //
@@ -1041,6 +1095,18 @@ export const RULES: readonly Rule[] = [
       c.heat > SCORCHING && c.moisture < ARID ? 1 + 0.5 * c.neighbourCounts[Biome.Desert]! : 0,
   },
 ];
+
+/**
+ * The ruleset the simulation runs, each rule carrying its derived identity.
+ *
+ * Attaching the key here rather than at the call site means there is exactly one place
+ * a rule's dice can come from, and it is not reachable from the hot loop — `evaluateTile`
+ * reads `rule.keyHash` off an object built once at module load. See `ruleKey`.
+ */
+export const RULES: readonly Rule[] = RULE_DEFS.map((r) => {
+  const key = ruleKey(r);
+  return { ...r, key, keyHash: hashString(key) };
+});
 
 /**
  * Derived-vs-hand-written edge overlaps that are DELIBERATE.

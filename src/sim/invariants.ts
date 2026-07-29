@@ -18,7 +18,7 @@
  * added one, that everything flows into and nothing flows out of.
  *
  * Eight checks, all fatal:
- *   1  taxonomy hygiene — unique ids, keys, glyphs, colours, materials
+ *   1  taxonomy hygiene — unique ids, keys, glyphs, colours, materials, RULE KEYS
  *   2  single strongly connected component over all 22 biomes (Tarjan)
  *   3  no trap nodes, no unreachable nodes, no biome with a single exit
  *   4  no DERIVED rule duplicating a hand-written edge (the fan-out rate hazard)
@@ -322,6 +322,41 @@ section('taxonomy');
     `  ${BIOMES.length} biomes · ${materials.length} materials · ` +
       `${new Set(materials).size} unique · ${new Set(BIOMES.map((d) => d.glyph)).size} glyphs · ` +
       `${new Set(BIOMES.map((d) => d.colour)).size} colours`,
+  );
+
+  // -------------------------------------------------------------------------
+  // Rule keys — the thing every transition roll is keyed on
+  // -------------------------------------------------------------------------
+  //
+  // A rule's key selects its stream of dice (see `ruleKey` in biomes.ts). Two rules
+  // sharing a key therefore share a roll stream, which is not a cosmetic clash: on any
+  // tile where both preconditions hold, the first in bucket order draws the same number
+  // the second would have drawn, so the second can only ever fire when the first already
+  // did — and the first always wins. The later rule becomes dead code that the graph
+  // checks below still count as a live edge, which is precisely the shape of silent
+  // wrongness this whole file exists to catch.
+  //
+  // Both halves are checked because they fail differently and only one is loud:
+  //   - a duplicate STRING key means two rules are genuinely indistinguishable, which is
+  //     an authoring mistake (usually a copy-pasted label on a duplicated edge);
+  //   - a duplicate HASH with distinct strings is a 32-bit FNV-1a collision. Vanishingly
+  //     unlikely at ~160 rules and completely invisible if it ever happened, which is
+  //     exactly why it is worth a Set rather than an appeal to the birthday bound.
+  const ruleKeys = RULES.map((r) => r.key);
+  const keysUnique = dupes('rule keys', ruleKeys);
+  const hashes = new Map<number, string[]>();
+  for (const r of RULES) (hashes.get(r.keyHash) ?? hashes.set(r.keyHash, []).get(r.keyHash)!).push(r.key);
+  const collisions = [...hashes.values()].filter((keys) => new Set(keys).size > 1);
+  for (const keys of collisions) {
+    fail(
+      `rule key HASH COLLISION between ${keys.map((k) => `"${k}"`).join(' and ')} — ` +
+        'these rules would share a roll stream. Reword one label.',
+    );
+  }
+  console.log(
+    `  ${keysUnique && collisions.length === 0 ? green('✓') : red('✗')} ` +
+      `${RULES.length} rules · ${new Set(ruleKeys).size} unique keys · ` +
+      `${hashes.size} distinct roll streams`,
   );
 }
 

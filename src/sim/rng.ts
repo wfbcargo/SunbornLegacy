@@ -21,6 +21,24 @@ export function hash32(...parts: number[]): number {
   return h >>> 0;
 }
 
+/**
+ * 32-bit FNV-1a over a string. Turns a stable NAME into a stable numeric stream id.
+ *
+ * This is what lets a roll be keyed on what a thing IS rather than on where it happens
+ * to sit in an array. `rollAt` takes numbers, so anything with a string identity — a
+ * transition rule, a cycle — needs exactly this bridge to become a roll coordinate.
+ * See `ruleKey` in biomes.ts for why that distinction is load-bearing.
+ *
+ * Not a cryptographic hash and not trying to be: it is a stream selector, and the
+ * property that matters is that different names land on different values. `invariants.ts`
+ * checks that they actually do for the ruleset, rather than trusting the birthday bound.
+ */
+export function hashString(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
 /** Uniform float in [0, 1) derived directly from a coordinate tuple. No state. */
 export function rollAt(...parts: number[]): number {
   const h = hash32(...parts);

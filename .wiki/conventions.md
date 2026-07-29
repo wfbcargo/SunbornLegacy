@@ -2,6 +2,12 @@
 
 ## Language & runtime
 - TypeScript executed natively by Node ≥ 22.6 (currently v24). **No build step, no bundler.**
+- **One deliberate exception: the viewer's browser client is plain `.js`.** It lives at
+  `src/viewer/public/` and is therefore outside `include: ["src/**/*.ts"]`, so it gets **no
+  typecheck coverage** — that is the accepted cost of having no build step for browser code.
+  Do not write viewer client code in `.ts` expecting it to be checked; if it ever should be,
+  it needs its own scoped tsconfig with `lib: ["ES2023","DOM"]` and no node types
+  (decision `0004`).
 - `.ts` extensions in import specifiers (`from './world.ts'`) — required by
   `allowImportingTsExtensions` + NodeNext.
 - `type` modifier on type-only imports (`verbatimModuleSyntax` is on).
@@ -29,5 +35,6 @@ allocation-heavy code.
 
 ## Testing
 There is no test framework. Verification is executable harnesses run via npm scripts
-(`sim:check`, `sim:sweep`, `sim:trace`) that print results and exit non-zero on failure.
-New checks follow that pattern unless a framework is explicitly adopted.
+(`typecheck`, `sim:check`, `sim:golden`, `sim:sweep`, `sim:trace`) that print results and exit
+non-zero on failure. New checks follow that pattern unless a framework is explicitly adopted.
+`typecheck` (R-002) and `sim:golden` (R-010) are merge gates.

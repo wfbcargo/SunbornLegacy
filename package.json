@@ -5,15 +5,22 @@
   "type": "module",
   "description": "A living-world MMO of caravans, industry, and trade in a multiverse being burned clean.",
   "scripts": {
-    "sim": "node src/sim/run.ts --days 1200",
+    "typecheck": "tsc --noEmit",
+    "sim": "node src/sim/run.ts",
     "sim:long": "node src/sim/run.ts --days 3000",
     "sim:beam": "node src/sim/run.ts --beam",
     "sim:still": "node src/sim/run.ts --cycles still",
     "sim:check": "node src/sim/invariants.ts",
+    "sim:golden": "node src/sim/golden.ts",
     "sim:sweep": "node src/sim/sweep.ts",
-    "sim:trace": "node src/sim/diagnose.ts"
+    "sim:trace": "node src/sim/diagnose.ts",
+    "viewer": "node src/viewer/server.ts"
   },
   "engines": {
     "node": ">=22.6"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "typescript": "7.0.2"
   }
 }
