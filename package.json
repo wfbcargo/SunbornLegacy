@@ -1,0 +1,19 @@
+{
+  "name": "sunborn-legacy",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "A living-world MMO of caravans, industry, and trade in a multiverse being burned clean.",
+  "scripts": {
+    "sim": "node src/sim/run.ts --days 1200",
+    "sim:long": "node src/sim/run.ts --days 3000",
+    "sim:beam": "node src/sim/run.ts --beam",
+    "sim:still": "node src/sim/run.ts --cycles still",
+    "sim:check": "node src/sim/invariants.ts",
+    "sim:sweep": "node src/sim/sweep.ts",
+    "sim:trace": "node src/sim/diagnose.ts"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}
