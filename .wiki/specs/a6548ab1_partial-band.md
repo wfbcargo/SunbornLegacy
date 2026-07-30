@@ -1,7 +1,7 @@
 # Spec a6548ab1 — `stepDay` must evaluate every column exactly once
 
 Branch: `main--spec/a6548ab1_partial-band` (standalone spec)
-Status: in progress
+Status: landed on main (commit 86f5080)
 
 ## Objective
 

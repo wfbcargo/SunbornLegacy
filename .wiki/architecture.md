@@ -65,7 +65,7 @@ never its array position, so reordering `RULES` changes precedence only (decisio
   harnesses — callers, not stepping code.
 - **`src/viewer/` depends on `src/sim/`; the sim never knows the viewer exists.** One-way.
   The seam is the `World` read surface plus the exports of `report.ts`, `biomes.ts`,
-  `cycles.ts`, `reachability.ts` and `DEFAULT_BAND_WIDTH` from `world.ts`. Presentation
+  `cycles.ts` and `reachability.ts`. Presentation
   policy stays viewer-side — the 600-day sample window and the ANSI→RGB palette both belong
   there, not in the sim.
 - **The HTTP seam is name-frozen.** `StabilityVerdict` field names, plus `BiomeDef` fields,

@@ -2,7 +2,7 @@
 
 Branch: `main--epic/208817c9_world-viewer--spec/dd49a107_world-viewer`
 Epic: `208817c9_world-viewer`
-Status: landed in epic 208817c9, pending merge to main
+Status: landed on main (epic 208817c9, commit 6b609c7)
 
 ## Objective
 

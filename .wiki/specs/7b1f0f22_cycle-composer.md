@@ -1,7 +1,7 @@
 # Spec 7b1f0f22 — Cycle composer and world sizing
 
 Branch: `main--spec/7b1f0f22_cycle-composer` (standalone spec; epic `208817c9` is closed and merged)
-Status: implemented by `impl-composer-3e91b7` — awaiting review
+Status: landed on main (commit e156fa7)
 
 ## Outcome
 

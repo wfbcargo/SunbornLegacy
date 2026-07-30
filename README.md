@@ -49,20 +49,46 @@ API-first with third-party clients, toroidal hex map, TypeScript end-to-end, fla
 (non-exponential) progression, regional materials, GM-per-world, world cycles as the
 disturbance engine, obedient characters, station/slot settlement, light automated combat.
 
+### How to run it
+
+Node ≥ 22.6 (developed on 24). **No install step and no build step** — zero runtime
+dependencies. To watch a world:
+
+```
+npm run viewer          # then open http://127.0.0.1:4173 and press Play
+```
+
+Everything else:
+
+```
+npm run typecheck    # tsc --noEmit — merge gate (R-002)
+npm run sim:golden   # golden-world hashes — merge gate (R-010)
+npm run sim          # full run, map + charts + both liveness tests
+npm run sim:check    # transition-graph + sweep-coverage invariants
+npm run sim:sweep    # cycle parameter sweep
+npm run sim:trace    # day-by-day trace of one disturbance cycle
+```
+
+⚠️ **Pass options after `--`:** `npm run sim -- --days 1500 --cycles still`. Without it npm
+eats the flags and you silently get a different world — the mistake that once invalidated
+the evidence recorded in this very file (see `SIMULATION.md` bug #8).
+
+`npm install` is only needed to run `npm run typecheck`, which wants the two type-only
+devDependencies. The simulator and viewer run from a bare checkout.
+
 ### Built
-- `src/sim/` — headless terrain simulator. TypeScript, runs natively on Node 24, **zero
+- **`src/viewer/`** — a local world viewer: the hex map on a canvas, play/pause/step,
+  hover readout, live liveness metrics, and a **cycle composer** — assemble any set of
+  cycles (including two of the same kind out of phase), read what each one does to a world,
+  set the world's size, and ask which biomes a given cycle set can never produce. It is a
+  **development instrument, not a product surface**: localhost only, no auth, and it
+  deliberately serves whole-world state the real API must never expose (decision `0001`).
+  ```
+  npm run viewer -- --width 320 --height 192 --seed 7 --cycles garden
+  ```
+- **`src/sim/`** — headless terrain simulator. TypeScript, runs natively on Node 24, **zero
   runtime dependencies, no build step.** `typescript` and `@types/node` are devDependencies,
   type-only and erased at runtime (decision `0004`).
-  ```
-  npm run typecheck    # tsc --noEmit — must be green before any merge
-  npm run sim          # full run, map + charts + both tests
-  npm run sim:check    # transition-graph invariants (single SCC)
-  npm run sim:golden   # golden-world hashes — has the simulation drifted?
-  npm run sim:sweep    # cycle parameter sweep
-  npm run sim:trace    # day-by-day trace of one disturbance cycle
-  ```
-  **Pass options with `--`:** `npm run sim -- --days 1500 --cycles still`. Without it npm
-  eats the flags and you silently get a different preset (see `SIMULATION.md` bug #8).
 
 ### Validated — 2026-07-29, re-measured after the rule re-key
 Rolls used to be keyed on a rule's position in the `RULES` array, so **every world changed
