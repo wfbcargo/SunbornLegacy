@@ -297,16 +297,149 @@ See "Open, escalated" below.
 
 ---
 
-## The beam: a travelling blob, and radius is the GM's dial
+## The beam: a wandering sun, followed by its scar
 
-**The sun is no longer a wall.** It was a full-height band of columns — every row of the
-band's columns under it at once, so a purge covered 100% of the world and transit was the only
-severity knob that mattered. It is now a hex disc of `radiusHexes` travelling a sinusoidal
-track, swept along the day's arc (decision `0008`). `shape: 'band'` is kept rather than
-deleted: it is the validated `anvil` prototype, `--beam` still selects it, and every band-only
-finding below is labelled as such.
+**The sun is no longer a wall, and it is no longer an event.** It was a full-height band of
+columns — every row under it at once, so a purge covered 100% of the world — and then a blob
+that went dormant for five days in six and retraced an identical curve every purge. It is now
+a hex disc travelling a sinusoid that **precesses**, permanently present, reaching a fraction
+of the world per crossing and all of it over a **great year** (decisions `0023`, `0024`).
+`shape: 'band'` is kept rather than deleted: it is the validated `anvil` prototype, `--beam`
+still selects it, and every band-only finding below is labelled as such.
+
+### ★ The great year: partial coverage per pass, complete coverage eventually
+
+Without precession the track was derived from progress through one traverse, so every traverse
+walked the same curve: coverage after 1 traverse 7.47%, after 5 traverses **still 7.47%**. The
+only way to reach every tile was a disc wide enough to cover the map in one pass, which is
+exactly how the sun stopped being visible.
+
+Wave phase now advances `1/K` turns per traverse, `K = greatYearTraverses`. 240 × 144, seed
+20260729, shipped defaults (radius 8, 2 oscillations, full amplitude, 60-day traverse, K = 8),
+driving the real `SolarBeam.dayState` and `affect`:
+
+| traverse | this pass | cumulative |
+|---|---|---|
+| 1 | 28.50% | 28.50% |
+| 2 | 28.46% | 52.34% |
+| 3 | 28.49% | 72.88% |
+| 4 | 28.48% | 86.92% |
+| 5 | 28.49% | 95.35% |
+| 6 | 28.45% | 99.31% |
+| 7 | 28.48% | **100.00%** |
+| 8 | 28.45% | 100.00% |
+| 9 | 28.50% | 100.00% — **reproduces traverse 1 exactly** |
+
+Every tile is reached within a 480-day great year, and the sun is exactly as predictable
+afterwards. Over those 9 traverses (540 days) there were **0 dormant days and 0 days on which
+the beam contributed nothing** — it is always present, which is the second property it lacked.
+
+Because `1/K` is rational the schedule is *learnable*: one number, and a player knows where the
+sun will be forever. A random or irrational drift would also cover the map and would not.
+
+### ★ The trail is the terrain, and that constrains the radius
+
+> "I didnt mean to render its path. I simply meant that because of the immense heat of the beam
+> effecting the biomes, it will be easy to see where it has been because of the biome changes
+> preceding it"
+
+So followability is a property of the simulation, not of a renderer, and it puts a **ceiling**
+on beam size where escapability puts a floor: a beam that burns everything leaves nothing for
+the burned ground to be legible against.
+
+Measured by differencing a beamed world against a no-cycle control at the same seed, so what is
+marked is exactly the ground the beam changed. 240 × 144, seed 20260729, one traverse, each
+character a 2 × 6 block: `#` most of the block changed, `:` some of it, blank untouched.
+
+**Shipped defaults — radius 8, 2 oscillations, 60-day traverse. 8.74% of the world changed.**
+
+```
+|                                                         :::::::                     :::::#:#:                          |
+|    :                                                    : :: :::                   :::::#:#::                          |
+| :::::                  ::                                ::::::::                 ::::###::                          : |
+|: :::                   ::::: :                            ::::::::                ::::::::                           ::|
+|  ::   ::              :: ::::                              ::::::::              :::::::#::                            |
+|   ::#:::          :::: : :: :                               :                     : ####::                             |
+|  :::#:##:          :##: :                                                      : :::#::::                              |
+|  ::######:        :#######:                                   : :: :::        :: ::::::                                |
+|   :::::::#:      :###:###:                                     :::::::       :#######::                                |
+|    ::#:: :::      ::: :::                                        :::::::    :#######:                                  |
+|       ::::  : ::: ::  :                   ::                    ::: :::##::#######::                : :::::            |
+|         :: :::::::::::                  ::::::::                   ::::::###:####:                ::##########         |
+|           ::::: :                    :::::::::#: :                  ::#::##:::::                :::::##########:       |
+|               :                    : :::::::: :  ::                    :::::                  ::#####:###########:     |
+|                                  :#::##:#::   ::::: ::                                       :#####:#:   :########:    |
+|                                 :########:     :##::::::                                    :#######:      ::######:   |
+|                                :########        :##: :                                     :::###:::        ::####:##  |
+|                                : ::  :           ::                                         ::#::::          :#######: |
+|                               ::::                 ::::::::                               ::::::::            :#######:|
+|:                           : :: ::::               ::  ::::                              :#::::#::             :#######|
+|#:                           :::::::::                 : :: ::                           ::::##::                :#:###:|
+|##                                                    : ::#:::                          :##:#:#:                 :######|
+|:                                                      : ::: ::                        ::###:##:                   ###::|
+|                                                        ::::::::                      :::::::::                         |
+```
+
+Two full waves, traceable end to end, wrapping at the seam.
+
+**The negative case — the r=16 / 9-oscillation default this replaces. 44.44% of the world
+changed in a single 45-day transit, and there is no track in it at all.**
+
+```
+|             :::: :::                            ::##::#:::::#:#::##:#:###:::###:###:#####:########################     |
+|  :::::  ::::::::::::::::                    :::::#####::::::::#:#::##::::###::##:####:##:#:##:####################     |
+|:::#:::::::::::::::::::::::          :  ::::::::#::::#::::::::::::::#:::#:#:#:::####:##:###:###:##:################:  ::|
+|#:  ::::: ::#::::::::::: : :::::::::::::::#:::#:::::#::#:::#:#:::#::#::::::#:#::::#:::#:::###:::#:######################|
+|::::: ::::::#::::: :::::::::::::::::: :::::::::#::::::::::::::::::::::::: ::::#::::::#:::#:##:::#:#:###:################|
+|:: :::#####:::::###:#:::  ::: : :::::: :::::: :::        :::::::        :###::::#:##:::#####:###::##################:###|
+|::::::#:#######:######::::::::::: :::::::##::::                         :##:::#:###::::::::#:#####:###:#################|
+|:##############################:###::::####:::::::: ::::: : ::: ::: :::: #::::##:##:#:####:#########################:###|
+|  :::#####:#::###########################:  :::::::::#::::::::::::::::#::############################################:: |
+|::#::::::::::::: :::::::::#:::::::#######::::: :  :::::: : :: ::::::##:::##############################################:|
+|##::::::## ::::::: :::::#::::::::#::::###:::: :: :: :  :: :::: :::::#::::###############################################|
+|####::::::: : ::::::: :#:::: ::::::::::##::#:::::::: :::::::: ::::: : #########:#:######################################|
+|#####:::::::::#::#:::::::::::::::::::::::::::#:::::::::: :: :#::::: :###################:##:#:####:#####################|
+|#####: ::::: :#####:::: ::#:::::::::::::#######:::::: ::::::::::::::::######::#::#######################################|
+|######::###:######::#:#:::::#######::#:##########:::  :::::::::: ::::::################################:::##############|
+|###################################################::::##::#::::::::::::###:#:#######################:###::#############|
+|#######:#:#::####################################::#: :         :  ::: ::::::::##::::#:##############: :   :::##########|
+|#######::::::::: ::::::::::::: :#:::::::::::::::::::                         #:#:#:#:####:::::########:#################|
+|#######:::::::::::: :::#:::: ::::: :::: :::######::::::#:#:#::::::::::      :::#::: #:#:######:::#######################|
+|#######:: ::: ::::::::::::::::#:#::::::::::::##:: :::::::::::: ::::::::::#:#::#::#:######::#:::#:#######################|
+|#####:::                     ::  ::: :: :#:::##:: ::::::::#:::::::::::::::::::::####:####:##:##:#:#####:################|
+|##::                                   ::::::::#:::::#::::::::::::#:#:::::::#:#:#:##:##:#############:##################|
+|:                                          ::::::#::##::::::#::::::###::#::#::###:##:#################################::|
+|             :: : :                           ::::####::: #:#:::##:##:#:#:#::#::#:######:###########################:   |
+```
+
+**And the other end — radius 2, same track. 1.37% changed.** The line is the *cleanest* wave of
+the three, and the world still fails: on the old geometry a beam-only world at r=2 latched six
+biome families with 61.56% of the map having no live out-rule, while `npm run sim` called it
+alive. Legibility alone is not a defence; see bug #9.
+
+**Two knobs set whether the scar reads as a wave, and they are the same two.** Row speed is
+`4·amplitude·(height/2)·oscillations / transitDays` and track SLOPE is
+`2π·amplitude·oscillations / width` — both proportional to `oscillations / transitDays`. Past
+roughly one row of rise per column the scar stops reading as a wave and starts reading as
+vertical stripes:
+
+| oscillations | slope (rows/col) | daily row travel, mean / max | reads as |
+|---|---|---|---|
+| 9 *(old default, 45 d)* | 17.0 | 68 / **143** of 144 | a full-height smear |
+| 3 | 5.7 | 14.4 / 22 | periodic stripes |
+| **2** *(shipped, 60 d)* | **3.8** | **9.6 / 15** | **a wave** |
+| 1 | 1.9 | 4.8 / 8 | a wave, at a third of the coverage |
 
 ### ★ Radius buys coverage, and coverage is what the world consumes
+
+⚠️ **The two tables in this section were measured on the OLD geometry** — `oscillations: 9`,
+full amplitude, dormant between purges, no precession — and radius was the only variable. They
+remain the evidence that *coverage is the currency*, which has not changed, but **their
+absolute coverage figures are specific to a 9-oscillation track and are not the shipped one**.
+Re-measured on the shipped 2-oscillation track, per pass: 7.00% (r=2), 14.17% (r=4), 28.50%
+(r=8), 42.73% (r=12), 56.78% (r=16). A shorter track covers less per pass at every radius, and
+coverage no longer saturates at 100% within one pass at any radius a world can hold — which is
+the point, because saturation is what erased the trail.
 
 240 × 144, 1200 days, seed 20260729. The track is held fixed (`oscillations: 9`,
 `amplitudeHalfHeights: 1.0`, `wavePhase: 0`, `homeRow: 0`) and `focusRadiusHexes` scales with
@@ -354,26 +487,48 @@ Below saturation, churn and escapability track it almost linearly. Above it, rad
 heat: r=12 → r=32 on `anvil` quadruples tile-days per purge (87,133 → 348,033) with coverage
 pinned at 100.00% and escapability flat (13.88% → 13.09%).
 
-⚠️ **The shipped default of `radiusHexes: 16` is the orchestrator's placeholder, not a
-validated choice.** The user asked to set it per world and declined to pick a size. It was
-selected to reproduce the validated worlds' verdicts, not to be the right severity. The table
-exists so the choice can be made from evidence — and the row that matters most is r=8, the
-smallest radius that keeps `sim:check` green on a beam-only world.
+⚠️ **`radiusHexes: 16` is no longer the default, and it was never a validated choice.** It was
+selected to reproduce the previously validated worlds' verdicts — tuned until it was
+indistinguishable from the thing it replaced — and the cost was a sun nobody could see. The
+shipped default is now **8**, chosen so the scar reads as a wave while `sim:check` stays green
+on a beam-only world. Escapability is still the floor; legibility is now the ceiling.
 
-### ⚠️ Two knobs, not one — and this finding is about a `band`
-Severity and frequency must be separate parameters:
+### ⚠️ Two knobs, not one — and this finding is about a `band`. It does not transfer.
+
+Under a **band**, severity and frequency must be separate parameters:
 - **transit** — how fast the beam crosses. Sets how long a tile bakes underneath it.
 - **cycle** — time from one purge to the next. Sets recovery time.
 
-Collapsing them inverts the intent: a *longer* period means a *slower* beam, so each tile is
-exposed for longer and the world sterilises. At a single-knob 900-day period, water reached
-**0%**, and the recommended band default is **60-day transit / 360-day cycle**.
+Collapsing them inverts the intent: a *longer* period means a *slower* beam, each tile is
+exposed for longer, and the world sterilises. **Re-measured on this tree** at a single-knob
+900-day period, 120 × 72, 60 game-years: sea share **23.81% → 5.60%, −0.3034 pp/y**. The
+finding reproduces.
 
-**All of that was measured with `shape: 'band'` and is true of a band.** Under a blob, dwell is
-set by radius and track length as well as by transit, and the binding constraint on severity is
-escapability rather than the liveness test — see bug #9. The two-knob *separation* survives the
-shape change; the specific 900-day and 60/360 numbers are band measurements and are labelled as
-such rather than restated as facts about "the beam".
+**Under a continuous blob the two knobs are deliberately collapsed, and the same 900-day period
+does not drain the sea at all: 23.81% → 23.52%, −0.0048 pp/y.** What goes wrong instead is that
+the world goes *quiet* — entropy 0.685, churn 0.24%, converging toward the `still` control —
+which the churn floor already catches (R-005). The mechanism differs because a band's dwell and
+its dose per day both rise with the period, while a blob's dose per day *falls*:
+
+| geometry | period | mean dwell | max dwell | beam tile-days/day |
+|---|---|---|---|---|
+| band, 8 cols | 30 d | 1.82 d | 2 d | 180 |
+| band, 8 cols | 60 d | 3.59 d | 4 d | 360 |
+| band, 8 cols | 120 d | 7.11 d | 8 d | 720 |
+| band, 8 cols | 240 d | 14.17 d | 16 d | 1440 |
+| blob r6 osc3 | 30 d | 1.30 d | 3 d | 459 |
+| blob r6 osc3 | 60 d | 1.60 d | 4 d | 284 |
+| blob r6 osc3 | 120 d | 2.21 d | 7 d | 196 |
+| blob r6 osc3 | 240 d | 3.42 d | 12 d | 152 |
+
+The liveness runs agree: 1500 days, 240 × 144, a band goes 0.726 → 0.771 entropy as transit
+runs 30 → 240, while a blob goes 0.764 → 0.718 and its churn falls monotonically 1.24% →
+0.54%.
+
+★ **So the direction a GM turns the dial inverts with the shape.** A *shorter* transit softens
+a band; a *longer* traverse softens a blob. That is why `crucible`'s beam period moved from 45
+days to 150 in this spec rather than staying put — decision `0024`, and the preset's own
+comment carries the water-trend table that set the number.
 
 ---
 

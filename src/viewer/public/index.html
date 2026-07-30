@@ -11,8 +11,18 @@
       <b>disconnected</b> — no reply from the viewer server. Is <code>npm run viewer</code> still running?
     </div>
     <section id="stage">
+      <!--
+        TWO CANVASES, ON PURPOSE. The map is redrawn by DIFF — only the tiles that
+        changed since the last frame are repainted — which is what makes 34,560 hexes
+        viewable at 15 fps. An overlay painted onto that canvas would be smeared across
+        every frame the diff did not happen to cover. The sky sits on its own layer and
+        is cleared and redrawn whole, which costs a few hundred line segments.
+      -->
       <div id="canvas-wrap">
-        <canvas id="map"></canvas>
+        <div id="canvas-stack">
+          <canvas id="map"></canvas>
+          <canvas id="sky"></canvas>
+        </div>
       </div>
       <div id="readout" class="readout empty">hover the map</div>
     </section>
@@ -124,6 +134,17 @@
         <span class="field-label">hex size <b id="zoom-value">3</b> px</span>
         <input type="range" id="zoom" min="2" max="12" step="0.5" value="3">
       </label>
+      <!--
+        A MARKER, NOT A FORECAST. Where the beam has BEEN is read off the scar it leaves
+        in the terrain — the glass, ash and lava trailing behind it — which needs no
+        overlay at all. This only says where it is now, so the trail and the sun can be
+        checked against each other. Decision `0025`.
+      -->
+      <label class="check">
+        <input type="checkbox" id="show-sky" checked>
+        <span>mark where the sun is now &mdash; its trail is the scorched ground itself</span>
+      </label>
+      <div id="sky-readout" class="sky-readout"></div>
 
       <p class="footnote" id="footnote"></p>
     </aside>

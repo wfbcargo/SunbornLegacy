@@ -65,11 +65,18 @@ interface GoldenCase {
  * The pinned worlds.
  *
  * Sized for a test that people will actually run: both cases together take a couple of
- * seconds, against ~10-30s for `npm run sim`. 500 days is not arbitrary — it clears the
- * `crucible` beam's full 420-day cycle plus a transit, a full 360-day year of seasons
- * and monsoon, and several 64-day tectonic/volcanic epochs, so every cycle in the set
- * has both fired and gone dormant at least once before the hash is taken. A shorter run
- * would leave whole cycles unexercised and pin a world that had not happened yet.
+ * seconds, against ~10-30s for `npm run sim`. 500 days is not arbitrary — it clears a full
+ * 360-day year of seasons and monsoon and several 64-day tectonic/volcanic epochs, so
+ * every SCHEDULED cycle has both fired and gone dormant before the hash is taken.
+ *
+ * ★ THE BEAM NO LONGER GOES DORMANT AT ALL, and 500 days no longer spans its whole
+ * schedule. `crucible`'s beam is continuous on a 200-day traverse with a 1600-day great
+ * year, so this pins 2.5 traverses at two and a half different precession phases — enough
+ * that a change to the track, the traverse index or the phase advance moves the hash,
+ * which is what a tripwire needs. It is NOT a full great year, so this file does not
+ * certify that traverse 8 still closes the cycle; the cumulative-coverage table in
+ * `.wiki/specs/0280c42b_wandering-sun.md` is what does that, and it is a measurement
+ * rather than a gate.
  */
 const CASES: readonly GoldenCase[] = [
   {
@@ -88,7 +95,7 @@ const CASES: readonly GoldenCase[] = [
     height: 96,
     seed: 20260729,
     days: 500,
-    hash: '599d7815137a0a4f',
+    hash: '0a1c093d0850b2ad',
   },
 ];
 

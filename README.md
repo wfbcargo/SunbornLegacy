@@ -93,10 +93,15 @@ devDependencies. The simulator and viewer run from a bare checkout.
     character against the ground they cross and die on stone. `garden` and `crucible` carry
     weather. It buys legibility, not disturbance, and spends nothing from the water budget.
     Decisions `0015`–`0017`.
-  - **A travelling sun.** The beam is a swept hex disc on a sinusoid rather than a full-height
-    wall, so **coverage** is a parameter where it used to be pinned at 100%. `radiusHexes` is a
-    first-class GM knob with a measured table behind it (below). `shape: 'band'` is kept and
-    scoped, not deleted. Decisions `0007`, `0008`.
+  - **A wandering sun.** The beam is a swept hex disc on a sinusoid rather than a full-height
+    wall, so **coverage** is a parameter where it used to be pinned at 100%. It is now also
+    **permanently present** and **precessing**: the track's wave phase advances `1/K` per
+    crossing, so it burns 28.50% of the world per pass and 100.00% over a **great year** of
+    `K` crossings, then repeats exactly. And its path is meant to be read off **the scar it
+    leaves in the terrain** — glass, ash and lava — not off an overlay, which makes partial
+    coverage load-bearing twice: a beam that burns everything leaves no trail. `radiusHexes`
+    is a first-class GM knob with a measured table behind it. `shape: 'band'` is kept and
+    scoped, not deleted. Decisions `0007`, `0008`, `0023`, `0024`, `0025`.
   - **A sea whose temperature reaches inland.** Per-tile stored temperature with thermal
     inertia, a per-day BFS proximity field with distance falloff, and seasons moved onto a
     separate ambient channel so an acute purge is not low-passed into nothing. Decisions
@@ -210,14 +215,22 @@ constructor defaults applied, which happened to match the config being claimed.)
 Neither is a defect. Both are choices deliberately left open rather than settled by whoever
 happened to be editing the code.
 
-### 1. The beam radius default is a placeholder, not a validated result
+### 1. The beam radius default is now chosen for legibility — check it is the severity you want
 
-You asked to set the beam's size per world and declined to pick one. **The shipped default of
-`radiusHexes: 16` is the orchestrator's choice, not yours** — it was selected to reproduce the
-previously validated worlds' verdicts, not because it is the right severity for anything.
+**The default moved from `radiusHexes: 16` to `8`, and the reason is your clarification** that
+the beam's path should be visible through "the biome changes preceding it". That makes the
+trail a simulation property and puts a *ceiling* on beam size: at r=16 one pass changed 44.44%
+of the world in a uniform smear with no track in it, and at the new default it changes 8.74%
+and draws a wave you can trace end to end (the pictures are in `SIMULATION.md`).
 
-The table exists so the choice can be made from evidence. `anvil` (beam only), 240 × 144,
-1200 days, seed 20260729, track held fixed so radius is the only variable:
+So radius is now squeezed from both sides — escapability from below, legibility from above —
+and 8 is where both hold. **It is still your call**, and the table below is the evidence for
+the floor. Note it was measured on the OLD 9-oscillation, dormant, non-precessing track and its
+coverage column is specific to that geometry; on the shipped track the same radii read 7.00%
+(r=2), 14.17% (r=4), 28.50% (r=8), 42.73% (r=12), 56.78% (r=16) per pass.
+
+`anvil` (beam only), 240 × 144, 1200 days, seed 20260729, track held fixed so radius is the
+only variable:
 
 | radius | coverage % | entropy | churn % | `npm run sim` says | `npm run sim:check` says |
 |---|---|---|---|---|---|
@@ -225,16 +238,19 @@ The table exists so the choice can be made from evidence. `anvil` (beam only), 2
 | 4 | 55.98 | 0.699 | 0.327 | **alive** | ✗ **34.16% — 4 families latched** |
 | **8** | 93.34 | 0.722 | 0.644 | alive | ✓ 15.78% |
 | 12 | 100.00 | 0.731 | 0.937 | alive | ✓ 13.88% |
-| **16** *(shipped)* | 100.00 | 0.730 | 1.197 | alive | ✓ 13.54% |
+| 16 *(then shipped)* | 100.00 | 0.730 | 1.197 | alive | ✓ 13.54% |
 | 24 | 100.00 | 0.730 | 1.620 | alive | ✓ 13.45% |
 | 32 | 100.00 | 0.728 | 1.926 | alive | ✓ 13.09% |
 
 **Below radius ≈8 the world latches, and `npm run sim` does not notice.** That is the row that
-should decide the number: coverage saturates between r=8 and r=12, and past saturation radius
-buys only heat — r=12 → r=32 quadruples the dose per purge and does not improve escapability at
-all. A radius below 8 produces a world that reports itself alive while most of it can never
-change again. **`npm run sim:check`, not `npm run sim`, is what catches that** — see
+decided the floor: a radius below 8 produces a world that reports itself alive while most of it
+can never change again. **`npm run sim:check`, not `npm run sim`, is what catches that** — see
 `SIMULATION.md` bug #9, which is the general lesson: a merge gate can be weaker than it looks.
+
+On the shipped track and with precession, `npm run sim:check` reads **13.97%** for `anvil` at
+r=8 with no latched family, so the floor still sits where this table put it — but the reason to
+stop there is now legibility as much as churn. Above r≈12 the trail begins to close up, and the
+whole point of the sun is that you can see where it has been.
 
 ### 2. `viewer/limits.ts`'s `MAX_TILES` bound is now questionable
 

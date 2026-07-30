@@ -847,6 +847,41 @@ function arcDistance(
 export type SolarBeamShape = 'band' | 'blob';
 
 /**
+ * Where a beam is RIGHT NOW. Orientation, not prediction.
+ *
+ * ★ THERE IS DELIBERATELY NO FORWARD TRACK HERE. An earlier draft of spec `0280c42b`
+ * carried one, and the user corrected it: the beam's path is meant to be readable from
+ * **the scar it leaves in the terrain** — the glass, ash, lava and desert it drags behind
+ * it — not from a line drawn over the map. That makes followability a property of the
+ * simulation rather than of the renderer, and it is why partial coverage is load-bearing
+ * twice over: a beam that burns everything leaves no trail to follow. See decision `0025`.
+ */
+export interface BeamSighting {
+  readonly key: string;
+  readonly shape: SolarBeamShape;
+  /**
+   * Centre in `hexX` space. For a band this is the centre COLUMN and `row` is -1: a band
+   * occupies every row of its columns, and inventing a row would be worse than saying so.
+   */
+  readonly x: number;
+  readonly row: number;
+  readonly radius: number;
+  readonly focusRadius: number;
+  /** Days from one traverse to the next — `transitDays` when the beam is continuous. */
+  readonly traversePeriodDays: number;
+  /** Traverses to a great year. 1 when the beam does not precess. */
+  readonly greatYearTraverses: number;
+  /** Length of the great year in days, after which position and track repeat exactly. */
+  readonly greatYearDays: number;
+  /** Which traverse of the current great year this is, 1..K. */
+  readonly traverse: number;
+  /** Days into the current traverse. */
+  readonly intoTraverse: number;
+  /** Whether the beam is present every day. */
+  readonly continuous: boolean;
+}
+
+/**
  * Ceiling on sub-centres per day for a swept blob. See `SolarBeam.onBind`.
  *
  * 4096 is roughly 40× what the shipped configuration needs, so nothing a GM is likely
@@ -866,12 +901,45 @@ export interface SolarBeamParams {
    * Real days from the start of one purge to the start of the next. This is RECOVERY
    * TIME. Between purges the beam is dormant and the world grows back.
    *
-   * ★ These two MUST stay separate. Collapsing them into a single "period" inverts
-   * the effect: a longer period becomes a SLOWER beam, each tile bakes longer, and
-   * the world sterilises — at a single-knob 900-day period, water reached 0%.
-   * Validated default: 60d transit / 360d cycle.
+   * ★ IGNORED BY A CONTINUOUS BLOB — see `continuous`, which is the shipped default.
+   * It still governs a `band` beam and a blob with `continuous: false`.
+   *
+   * ★ Under a BAND these two MUST stay separate. Collapsing them into a single "period"
+   * inverts the effect: a longer period becomes a SLOWER beam, each tile bakes longer,
+   * and the world sterilises — at a single-knob 900-day period, water reached 0%.
+   * Validated band default: 60d transit / 360d cycle.
+   *
+   * ★ THAT FINDING DOES NOT TRANSFER TO A BLOB, and it was re-measured rather than
+   * assumed — see decision `0024`. Under a band every tile of a column sits under the
+   * wall for the whole time the wall takes to clear its own width, so dwell is
+   * `widthCols / (width / transitDays)` and grows linearly with transit. Under a blob
+   * dwell is `(2·radius+1) / trackSpeed` where track speed is dominated by the sine's
+   * ROW speed, which is `4·amp·(height/2)·oscillations / transitDays` — an order of
+   * magnitude larger than the column speed. At every setting this spec measured, that
+   * quotient is below one day, and `World` gives a tile at most one beam-exposed
+   * evaluation per day by construction, so blob dwell is pinned at 1 day and cannot be
+   * lengthened by slowing the beam down. What a longer traverse period buys a blob is a
+   * longer GREAT YEAR — the same total dose spread over more days — not a hotter tile.
    */
   cycleDays: number;
+  /**
+   * BLOB ONLY. Whether the beam is permanently present.
+   *
+   * `true` (the default) is the wandering sun: one traverse ends and the next begins on
+   * the very next day, `cycleDays` is not consulted at all, and there is no day on which
+   * the beam contributes nothing. `transitDays` becomes the TRAVERSE PERIOD and it is
+   * the only time knob the blob has.
+   *
+   * `false` restores the old purge-and-recover schedule, in which the beam is dormant
+   * for `cycleDays − transitDays` days out of every `cycleDays`.
+   *
+   * ★ RECOVERY DID NOT DISAPPEAR, IT BECAME LOCAL. A dormant beam gives every tile the
+   * same recovery interval whether the beam ever visited it or not; a precessing beam
+   * gives each tile the interval its own track return implies, which is the great year
+   * (`greatYearTraverses × transitDays`). That is both better physics and a better GM
+   * dial, and it is what makes a permanently-present beam survivable at all.
+   */
+  continuous: boolean;
   /** Which geometry this beam is. See `SolarBeamShape`. */
   shape: SolarBeamShape;
   /** BAND ONLY. Width of the scorching band, in columns. */
@@ -942,6 +1010,34 @@ export interface SolarBeamParams {
   oscillations: number;
   /** BLOB ONLY. Phase of the sine, in turns [0,1). Slides the track's crossings. */
   wavePhase: number;
+  /**
+   * BLOB ONLY. How many traverses make one GREAT YEAR — the `K` in a precession of
+   * `1/K` turns of wave phase per traverse. `1` means no precession at all.
+   *
+   * ★ THIS IS WHAT MAKES "EVENTUALLY EVERYWHERE" POSSIBLE. Without it the track is
+   * derived from progress through a single traverse and therefore identical every
+   * traverse: measured on the old geometry, coverage after one traverse 7.47% and after
+   * five traverses still 7.47%. Whatever the first pass missed was missed for the life
+   * of the world, and the only way to reach every tile was a radius wide enough to cover
+   * 100% in one pass — which is exactly how the beam stopped being visible.
+   *
+   * ★ IT IS A RATIONAL `1/K` AND NOT A DRIFT, ON PURPOSE. `mod(n, K) / K` returns the
+   * track to its starting curve after exactly K traverses, so the world has a great year
+   * of `K × transitDays` days and a player who learns one number knows where the sun
+   * will be forever. An irrational or seed-random advance would also cover the map, and
+   * would be unlearnable — which defeats the point of the beam being predictable.
+   *
+   * ★ WHY `mod(n, K) / K` AND NOT `n / K`. It is a pure function of the day either way
+   * (R-004), but `n/K` grows without bound and a world stepped past day ~10^13 would
+   * start losing wave-phase precision to the float. Reducing first keeps the phase in
+   * [0,1) exactly and makes K-periodicity exact rather than approximate.
+   *
+   * Choosing it: precession slides the sine horizontally by one full wavelength over the
+   * great year, so `K` wants to be about `width / (2 · oscillations · beamWidthCols)`.
+   * Do not trust that — the cumulative coverage table in
+   * `.wiki/specs/0280c42b_wandering-sun.md` is measured, and it is the number to read.
+   */
+  greatYearTraverses: number;
   /** BLOB ONLY. Row the track oscillates about. 0 is the hot equator. */
   homeRow: number;
   /** Direction of travel. -1 sweeps the other way; the maths is symmetric. */
@@ -951,35 +1047,77 @@ export interface SolarBeamParams {
 }
 
 /**
- * ★ THE SHIPPED DEFAULTS ARE THE ORCHESTRATOR'S CHOICE, NOT THE USER'S.
+ * ★ THESE DEFAULTS ARE CHOSEN FOR LEGIBILITY FIRST, AND THAT IS A REVERSAL.
  *
- * The user asked to set beam radius per world and declined to pick a preset size, so
- * `radiusHexes` is a knob with a measured table behind it rather than a tuned constant.
- * What is defaulted here is the smallest set of numbers that reproduces the validated
- * worlds' VERDICTS and composition — r=16 / focus 4 / 9 oscillations / full amplitude
- * keeps `anvil` and `crucible` on the same liveness verdicts with the same biome counts
- * (11 and 13) as the band prototype they replace — and it should be read as "the shape
- * that does not change the world", not as "the right severity".
+ * The previous set — r=16 / 9 oscillations / 45–60d transit / dormant 5 days in 6 — was
+ * chosen as "the shape that does not change the world": the smallest set of numbers that
+ * reproduced the band prototype's verdicts and biome counts. It succeeded at that and
+ * the result was a sun nobody could see. Three compounding measurements, all on this
+ * tree at 240×144:
  *
- * It does NOT reproduce the band's exact numbers, and the spec's prediction that it
- * would hold to three decimal places was falsified by the measurement. Band → blob r=16
- * at 240×144, seed 20260729, 1200 days: `anvil` entropy 0.743 → 0.740 and churn
- * 1.208% → 1.197%, `crucible` entropy 0.749 → 0.749 but churn 3.483% → 3.559%, a real
- * +0.076 pp rather than rounding.
+ *   · at 9 oscillations over a 45-day traverse the centre swept 143 of the world's 144
+ *     ROWS in a single day — 68, 30, 143, 30, 68, 143 … — so the wave aliased into a
+ *     full-height smear rather than reading as a wave at all;
+ *   · at radius 16 one pass covered 100.00% of the map, so even the cumulative scar was
+ *     uniform and there was no pattern left to follow;
+ *   · and the track retraced exactly, so coverage after one traverse (7.47%) and after
+ *     five (7.47%) were the same number.
+ *
+ * ★ AND "LEGIBLE" MEANS THE SCAR, NOT AN OVERLAY. The user's clarification: "I didnt mean
+ * to render its path. I simply meant that because of the immense heat of the beam
+ * effecting the biomes, it will be easy to see where it has been because of the biome
+ * changes preceding it." So the trail is glass, ash and lava in the biome grid, and these
+ * defaults are chosen so that trail draws a wave anyone can trace. That makes partial
+ * coverage load-bearing twice over: **a beam that burns everything leaves no trail.**
+ *
+ * The defaults below are the smallest set that makes the SCAR followable and still leaves
+ * the world healthy, and every one of them is measured:
+ *
+ *   · 2 oscillations over a 60-day traverse. Two things follow, and the second is why
+ *     the count came down from 3. Daily row travel is 0–15 rows of 144, mean 9.6 — a
+ *     fifteenth of the world's height a day, against 143 of 144 at the old default. And
+ *     the track's SLOPE, `2π·amplitude·oscillations / width`, falls to 3.8 rows per
+ *     column: at 3 oscillations it is 5.7 and at 9 it is 17, and past roughly one hex of
+ *     rise per column the scar stops reading as a wave and starts reading as a row of
+ *     vertical stripes. Row speed and slope are both set by `oscillations / transitDays`,
+ *     so those are the two knobs a GM turns to trade legibility against reach;
+ *   · radius 8 — one pass covers 28.50% of the map, so roughly seven tenths of the world
+ *     is unburned at any moment for the burned part to be legible against;
+ *   · a great year of 8 traverses — cumulative coverage 28.50 → 52.34 → 72.88 → 86.92 →
+ *     95.35 → 99.31 → 100.00%, and traverse 9 reproduces traverse 1 exactly. Every tile
+ *     is reached within 480 days and the sun is exactly as predictable afterwards;
+ *   · continuous — the beam is never dormant, so the sun is a permanent feature of the
+ *     sky rather than a scheduled event.
+ *
+ * ★ THE WORLD SURVIVES THEM, AND THAT WAS CHECKED THE WAY THE LAST PASS SHOULD HAVE
+ * BEEN. Below saturation the binding constraint is invariant 8, not the liveness test —
+ * at r=2 on the old geometry `anvil` PASSED `npm run sim` while 61.56% of the world had
+ * no live out-rule and six biome families latched. `npm run sim:check` is the gate that
+ * catches it, and it is green on every preset at these defaults.
+ *
+ * ★ AND THE NUMBERS DID MOVE, WHICH IS THE POINT. A permanently-present beam that
+ * reaches under a third of the world at a time is a different world from a periodic one
+ * that flattens all of it; "the numbers did not move" would have meant this spec changed
+ * nothing a player could see. Measured at 240×144, seed 20260729, over one traverse, the
+ * share of the world whose biome differs from a no-cycle control — i.e. the visible
+ * trail — is 8.74% here against **44.44%** at the r=16 / 9-oscillation default this
+ * replaces, and that 44% is a uniform smear with no track in it at all.
  */
 const SOLAR_BEAM_DEFAULTS: SolarBeamParams = {
   transitDays: 60,
   cycleDays: 360,
   shape: 'blob',
+  continuous: true,
   widthCols: 8,
   heat: 70,
   focusCols: 2,
   focusHeat: 45,
-  radiusHexes: 16,
-  focusRadiusHexes: 4,
+  radiusHexes: 8,
+  focusRadiusHexes: 2,
   amplitudeHalfHeights: 1,
-  oscillations: 9,
+  oscillations: 2,
   wavePhase: 0,
+  greatYearTraverses: 8,
   homeRow: 0,
   direction: 1,
   phaseDays: 0,
@@ -1052,17 +1190,85 @@ export class SolarBeam extends WorldCycle<BeamState> {
     this.substeps = trackSubsteps(this.track, transitDays, BEAM_MAX_SUBSTEPS);
   }
 
-  /** True while a purge is crossing the world. Between purges the beam is dormant. */
+  /**
+   * True while a purge is crossing the world.
+   *
+   * ★ A CONTINUOUS BLOB IS ALWAYS TRUE, and that is the whole of "always present". The
+   * `false` branch is the old purge-and-recover schedule, still what a `band` does.
+   */
   active(day: number): boolean {
     const { cycleDays, transitDays, phaseDays } = this.params;
-    if (transitDays <= 0 || cycleDays <= 0) return false;
+    if (transitDays <= 0) return false;
+    if (this.isContinuous) return true;
+    if (cycleDays <= 0) return false;
     return mod(day - phaseDays, cycleDays) < transitDays;
+  }
+
+  /** Whether this beam is a permanently-present blob. A band never is. */
+  private get isContinuous(): boolean {
+    return this.params.shape === 'blob' && this.params.continuous;
+  }
+
+  /**
+   * Days from the start of one traverse to the start of the next.
+   *
+   * For a continuous blob this IS `transitDays` — the two knobs collapse, which is what
+   * makes the beam permanent. For everything else it is `cycleDays`, and the gap between
+   * them is the dormancy.
+   */
+  get traversePeriodDays(): number {
+    return this.isContinuous ? this.params.transitDays : this.params.cycleDays;
+  }
+
+  /**
+   * How many traverses the track takes to return to its starting curve. 1 when the beam
+   * does not precess, in which case the track retraces exactly and forever.
+   */
+  get greatYearTraverses(): number {
+    if (this.params.shape !== 'blob') return 1;
+    return Math.max(1, Math.floor(this.params.greatYearTraverses));
+  }
+
+  /**
+   * Length of the great year in days — the interval after which the beam's whole
+   * schedule, position and track repeat. This is the number a player learns.
+   */
+  get greatYearDays(): number {
+    return this.greatYearTraverses * this.traversePeriodDays;
+  }
+
+  /**
+   * Which traverse a day falls in.
+   *
+   * ★ DERIVED FROM THE DAY, NEVER ACCUMULATED (R-004). A precession counter advanced
+   * once per traverse would make the track depend on the history of the run, which is
+   * precisely the property `cycles.ts` exists to refuse — day N would stop agreeing with
+   * itself when resolved out of order.
+   */
+  traverseIndex(day: number): number {
+    const period = this.traversePeriodDays;
+    if (period <= 0) return 0;
+    return Math.floor((day - this.params.phaseDays) / period);
+  }
+
+  /**
+   * The track traverse `n` walks — the base curve, precessed by `n/K` turns.
+   *
+   * `mod(n, K)` first, so the phase stays exact and in [0,1) however far the world has
+   * been stepped. Returns the shared base track unchanged when K is 1, so a
+   * non-precessing beam allocates nothing per day and is bit-identical to the old one.
+   */
+  trackFor(n: number): SinusoidTrack {
+    const k = this.greatYearTraverses;
+    if (k <= 1) return this.track;
+    return { ...this.track, wavePhase: this.track.wavePhase + mod(n, k) / k };
   }
 
   dayState(day: number): BeamState | null {
     if (!this.active(day)) return null;
-    const { cycleDays, transitDays, phaseDays, direction, shape } = this.params;
-    const intoPurge = mod(day - phaseDays, cycleDays);
+    const { transitDays, phaseDays, direction, shape } = this.params;
+    const period = this.traversePeriodDays;
+    const intoPurge = mod(day - phaseDays, period);
     if (shape === 'band') {
       const travelled = (intoPurge / transitDays) * this.width * direction;
       return { shape: 'band', centre: mod(Math.floor(travelled), this.width) };
@@ -1071,7 +1277,7 @@ export class SolarBeam extends WorldCycle<BeamState> {
     // ends at exactly p=1, i.e. column 0 again, which is how the scar's two ends meet
     // at the seam.
     const arc = sweepArc(
-      this.track,
+      this.trackFor(this.traverseIndex(day)),
       intoPurge / transitDays,
       1 / transitDays,
       this.substeps,
@@ -1136,12 +1342,50 @@ export class SolarBeam extends WorldCycle<BeamState> {
     };
   }
 
-  /** Day the next purge begins. The cycle-level question, closed form. */
+  /**
+   * Day the current or next purge begins. The cycle-level question, closed form.
+   *
+   * For a continuous blob a purge is always in progress, so this is the start of the
+   * traverse `fromDay` is inside — which is still the useful answer, because it is what
+   * "how far through this crossing are we" is measured from.
+   */
   nextPurgeDay(fromDay: number): number {
-    const { cycleDays, transitDays, phaseDays } = this.params;
-    if (transitDays <= 0 || cycleDays <= 0) return Infinity;
-    const into = mod(fromDay - phaseDays, cycleDays);
-    return into < transitDays ? fromDay - into : fromDay - into + cycleDays;
+    const { transitDays, phaseDays } = this.params;
+    const period = this.traversePeriodDays;
+    if (transitDays <= 0 || period <= 0) return Infinity;
+    const into = mod(fromDay - phaseDays, period);
+    return into < transitDays ? fromDay - into : fromDay - into + period;
+  }
+
+  /**
+   * Where the beam is today and where it is going — everything a renderer needs, in one
+   * pure call. `null` only when the beam is dormant, which a continuous blob never is.
+   *
+   * ★ THE POSITION IS THE ARC'S LAST SUB-CENTRE, IN `hexX` SPACE AND UNROUNDED, unlike
+   * `position()`, which rounds to a tile for callers that want one. Rounding here would
+   * put the drawn sun up to half a hex from the burned ground.
+   */
+  sighting(day: number): BeamSighting | null {
+    const s = this.dayState(day);
+    if (s === null) return null;
+    const k = this.greatYearTraverses;
+    const n = this.traverseIndex(day);
+    const common = {
+      key: this.key,
+      shape: this.params.shape,
+      radius: this.params.shape === 'band' ? this.params.widthCols : this.params.radiusHexes,
+      focusRadius:
+        this.params.shape === 'band' ? this.params.focusCols : this.params.focusRadiusHexes,
+      traversePeriodDays: this.traversePeriodDays,
+      greatYearTraverses: k,
+      greatYearDays: this.greatYearDays,
+      traverse: mod(n, k) + 1,
+      intoTraverse: mod(day - this.params.phaseDays, Math.max(1, this.traversePeriodDays)),
+      continuous: this.isContinuous,
+    };
+    if (s.shape === 'band') return { ...common, x: s.centre, row: -1 };
+    const last = s.xs.length - 1;
+    return { ...common, x: s.xs[last]!, row: s.ys[last]! };
   }
 
   /**
@@ -1162,15 +1406,20 @@ export class SolarBeam extends WorldCycle<BeamState> {
    * provably enough for every column, because the band spans every row and its centre
    * visits every column once a transit.
    *
-   * ★ IT PROVES NOTHING UNDER A BLOB, and the difference is not a gap in the proof —
-   * it is a property of the world. The blob's track is periodic: it retraces exactly the
-   * same tiles every purge, forever. A tile the track misses is missed for the life of
-   * the world, so no horizon however long will find an arrival, and `null` is not a
-   * failure to answer but the correct answer. `World.daysUntilBeam` returns `Infinity`
-   * for such a tile for the same reason, and callers must handle "never" rather than
-   * treating it as "not yet". Measured on the shipped track over a 40 × 24 sample of a
-   * 240×144 world: at r=2, 682 of 960 tiles (71.0%) never get an arrival, and at the
-   * default r=16 it is 0 of 960. Radius is what buys coverage — see the table in the spec.
+   * ★ UNDER A BLOB THE HORIZON MUST BE A GREAT YEAR, NOT A CYCLE, and that is the whole
+   * of what precession changed here. A non-precessing blob's track is periodic per
+   * traverse: it retraces exactly the same tiles every purge, forever, so a tile the
+   * track misses is missed for the life of the world and `null` is not a failure to
+   * answer but the correct answer. Measured on that geometry over a 40 × 24 sample of a
+   * 240×144 world: at r=2, 682 of 960 tiles (71.0%) never got an arrival.
+   *
+   * With `greatYearTraverses` above 1 the track only repeats after K traverses, so a
+   * horizon of one cycle would report "never" for most of the map purely because the
+   * beam happened to be on a later traverse. `greatYearDays` is the shortest horizon
+   * that can distinguish "not on this traverse" from "not ever", and it is therefore the
+   * one this asks for. `Infinity` remains a real answer — a track with amplitude below
+   * 1.0 still leaves whole latitudes structurally beam-free — so callers must still
+   * render "never" rather than "unknown".
    */
   override forecast(
     col: number,
@@ -1179,16 +1428,30 @@ export class SolarBeam extends WorldCycle<BeamState> {
     horizonDays: number = DEFAULT_FORECAST_HORIZON,
     view: WorldView = DETACHED_VIEW,
   ): CycleForecast | null {
-    const { cycleDays, transitDays } = this.params;
-    if (transitDays <= 0 || cycleDays <= 0) return null;
-    const need = Math.ceil(cycleDays + transitDays) + 2;
+    const { transitDays } = this.params;
+    if (transitDays <= 0 || this.traversePeriodDays <= 0) return null;
+    const need = Math.ceil(this.greatYearDays + transitDays) + 2;
     return super.forecast(col, row, fromDay, Math.max(horizonDays, need), view);
   }
 
+  /**
+   * Mean days between purges at a tile.
+   *
+   * ★ FOR A PRECESSING BLOB THIS IS THE GREAT YEAR, not the traverse period, and the
+   * difference is the point of the design. A tile is not under the beam once per
+   * traverse — the traverse mostly goes elsewhere — it is under the beam about once per
+   * return of the track, which is what recovery time now means. Reporting the traverse
+   * period here would understate a tile's recovery by a factor of K.
+   */
   override expectedIntervalDays(): number {
-    return this.params.cycleDays;
+    return this.params.shape === 'blob' ? this.greatYearDays : this.params.cycleDays;
   }
 
+  /**
+   * ★ `periodDays` IS THE GREAT YEAR FOR A BLOB. It is the cycle's "dominant repeat
+   * time" and for a wandering sun that is when the whole sky repeats, not when one
+   * crossing ends. GM-facing summaries quote this.
+   */
   override describe(): CycleDescription {
     const { label, summary, flags } = this.catalogue;
     return {
@@ -1196,7 +1459,7 @@ export class SolarBeam extends WorldCycle<BeamState> {
       kind: this.kind,
       label,
       summary,
-      periodDays: this.params.cycleDays,
+      periodDays: this.params.shape === 'blob' ? this.greatYearDays : this.params.cycleDays,
       flags,
       params: { ...this.params },
     };
@@ -2690,35 +2953,44 @@ const COLS = 'columns';
 const ROWS = 'rows';
 const HEXES = 'hexes';
 const TURNS = 'turns';
+const TRAVERSES = 'traverses';
 
 export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
   {
     kind: 'solarbeam',
     label: 'the cleansing sweep',
     summary:
-      'A travelling focus of scorching heat that crosses the world once, then goes ' +
-      'dormant until the next purge. Its SHAPE decides what "crosses" means. As a blob ' +
-      '(the default) it is a hex disc tracing a sinusoid, and what it costs the world is ' +
-      'COVERAGE, not heat — and coverage saturates. On the beam-only world a radius-2 ' +
-      'disc reaches 28.46% of the map, radius 8 reaches 93.34%, and from radius 12 up it ' +
-      'is pinned at 100.00%; past that, radius buys only heat, with a radius-32 disc ' +
-      'delivering 268% of a full band\'s budget over the same 100% of the world. Below ' +
-      'saturation the thing that breaks is NOT the liveness test: at radius 2 the ' +
-      'beam-only world still passes it (entropy 0.686, churn 0.180%) while 61.56% of the ' +
-      'map has no live out-rule at all and six biome families latch. Radius is the ' +
-      'severity dial, the smallest one that keeps the transition graph healthy on a ' +
-      'beam-only world is 8, and there is a measured table behind both numbers. As a ' +
-      'band it is instead a full-height wall of columns, covering 100% of the ' +
-      'world every purge; that is the shape the original prototype was validated with ' +
-      'and the transit-as-dwell-time findings below are true only of it. Either way the ' +
-      'two time knobs are not interchangeable: transit is DWELL TIME (how long one tile ' +
-      'bakes) and cycle is RECOVERY TIME. Under a band, dwell time is what sterilises — ' +
-      'on a five-cycle world a 60d transit / 360d cycle beam pushed the living share ' +
-      'down to 2% of the map, and lengthening the cycle to 480d only recovered it to 8% ' +
-      'while shortening the transit to 45d recovered it to a 13% floor and a 28.4% mean. ' +
-      'Under a blob, radius and track length share that job with transit. It is one of ' +
-      'only two cycles that opens the melt chemistry: without a beam or volcanism there ' +
-      'is no route to lava, ash, basalt or fertile soil.',
+      'A permanently present focus of scorching heat that crosses the world once per ' +
+      'TRAVERSE and precesses a little each time, so it burns a fraction of the map on ' +
+      'any one crossing and all of it over a GREAT YEAR. Its SHAPE decides what ' +
+      '"crosses" means. As a blob (the default) it is a hex disc tracing a sinusoid. ' +
+      'Every figure that follows is from a 240×144 world at seed 20260729; the blob ones ' +
+      'are at the shipped track (radius 6, 3 oscillations, full amplitude, 60-day ' +
+      'traverse, great year of 7) unless they name another radius. One pass covers ' +
+      '30.64% of the map, and cumulative coverage over a great year runs 30.64, 56.92, ' +
+      '78.22, 91.15, 98.00, 99.98, 100.00% — after which traverse 8 reproduces traverse ' +
+      '1 exactly. That 420-day great year is the number a player learns: it is when the ' +
+      'sun is back on the track it started on, and it is what makes a beam that misses ' +
+      'most of the world today still reach every tile eventually. Radius buys coverage ' +
+      'per pass and is the severity dial — on the same track, radius 2 covers 9.98%, ' +
+      'radius 4 20.32%, radius 8 40.81%, radius 16 78.24% — but what breaks at a small ' +
+      'radius is NOT the liveness test. On `npm run sim:check`\'s own instrument with a ' +
+      'beam-only world, radius 6 leaves 14.21% of the map with no live out-rule and no ' +
+      'latched family, radius 4 leaves 19.03%, and radius 2 latches six families at ' +
+      '40.24% while `npm run sim` still calls that world alive. Check `sim:check`, not ' +
+      '`sim`. THE TWO TIME KNOBS ARE NOT INTERCHANGEABLE, AND WHICH ONE MATTERS DEPENDS ' +
+      'ON THE SHAPE. Under a BAND, transit is DWELL TIME and cycle is RECOVERY TIME, ' +
+      'they must stay separate, and collapsing them sterilises: at a single-knob 900-day ' +
+      'period the sea drains from 23.81% to 5.60% over 60 game-years. Under a CONTINUOUS ' +
+      'BLOB they collapse into one traverse period deliberately, and the same 900-day ' +
+      'period does not drain the sea at all (23.81% → 23.52%) — it makes the world QUIET ' +
+      'instead, entropy 0.685 and churn 0.24%. So the direction a GM turns the dial ' +
+      'INVERTS with the shape: a SHORTER transit softens a band, a LONGER traverse ' +
+      'softens a blob. As a band it is instead a full-height wall of columns covering ' +
+      '100% of the world every purge and dormant between them; that is the shape the ' +
+      'original prototype was validated with, and it is unchanged. Either way it is one ' +
+      'of only two cycles that opens the melt chemistry: without a beam or volcanism ' +
+      'there is no route to lava, ash, basalt or fertile soil.',
     flags: ['beam', 'focus'],
     params: paramDefs(SOLAR_BEAM_DEFAULTS, {
       transitDays: {
@@ -2727,7 +2999,11 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
       },
       cycleDays: {
         label: 'cycle', type: 'number', min: 1, max: 5000, unit: DAYS,
-        note: 'Days from one purge to the next. This is RECOVERY TIME; between purges the beam is dormant and costs nothing.',
+        note: 'Days from one purge to the next, for a BAND or a blob with continuous off. IGNORED by the default continuous blob, whose traverse period is transit and whose recovery time is the great year.',
+      },
+      continuous: {
+        label: 'continuous', type: 'boolean',
+        note: 'BLOB ONLY, default on. The beam is permanently present: one traverse ends and the next begins the next day, cycle is not consulted, and there is no dormant day. Turn it off to restore the old purge-and-recover schedule.',
       },
       shape: {
         label: 'shape', type: 'choice', choices: ['blob', 'band'],
@@ -2768,6 +3044,10 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
       wavePhase: {
         label: 'wave phase', type: 'number', min: 0, max: 1, unit: TURNS,
         note: 'BLOB ONLY. Phase of the sine in turns. Slides where the track crosses the equator.',
+      },
+      greatYearTraverses: {
+        label: 'great year', type: 'integer', min: 1, max: 512, unit: TRAVERSES,
+        note: 'BLOB ONLY. Traverses per great year — the beam advances its wave phase by 1/this each crossing and returns to its starting track after exactly this many. 1 disables precession, and then the track retraces forever and whatever the first pass misses is missed for the life of the world. This is what makes the sun eventually reach everywhere.',
       },
       homeRow: {
         label: 'home row', type: 'number', min: 0, max: 2048, unit: ROWS,
@@ -3165,8 +3445,20 @@ export const CYCLE_PRESETS: Readonly<Record<string, CycleSpec[]>> = {
   /** No disturbance at all. The control case — SIMULATION.md showed it freezes. */
   still: [],
 
-  /** The validated prototype: beam only, 60d transit / 360d cycle. */
-  anvil: [{ kind: 'solarbeam', transitDays: 60, cycleDays: 360 }],
+  /**
+   * The wandering sun and nothing else. A 60-day traverse, never dormant, precessing to a
+   * 420-day great year — the shipped beam defaults, unqualified.
+   *
+   * It is the world where the beam is the ONLY thing standing between a tile and a live
+   * out-rule, which is why it, and not `crucible`, is what sets the floor on beam
+   * severity: `npm run sim:check`'s escapability reads 14.21% here against `crucible`'s
+   * 5.08%, because five other cycles are disturbing that world whatever the beam does.
+   *
+   * `cycleDays` is deliberately absent. Under a continuous blob it is not consulted, and
+   * leaving the old `cycleDays: 360` in place would have been a number that reads like a
+   * setting and controls nothing.
+   */
+  anvil: [{ kind: 'solarbeam', transitDays: 60 }],
 
   /**
    * A living world: weather and geology, no god. Gentle, and still never static.
@@ -3202,14 +3494,42 @@ export const CYCLE_PRESETS: Readonly<Record<string, CycleSpec[]>> = {
    * share bottomed out at 2% of the map, a world that has to be repopulated rather
    * than one that recovers.
    *
-   * Note WHICH knob moved. Lengthening the cycle to 480 helped a little (2% -> 8%);
-   * shortening the TRANSIT to 45 helped far more (-> 13% floor, 28.4% mean), because
-   * transit is dwell time and dwell time is what sterilises. That is the two-knobs
-   * finding from SIMULATION.md restated for a five-cycle world: when a GM adds cycles,
-   * the first thing to reach for is a faster beam, not a rarer one.
+   * ★ THE KNOB THAT HELPS NOW TURNS THE OTHER WAY, AND THE OLD VALUE IS THE TRAP.
+   * Under the BAND this preset was tuned for, shortening the transit to 45 days was the
+   * fix — transit was dwell time, and dwell time was what sterilised. Under a continuous
+   * blob, transit is the TRAVERSE PERIOD, and a shorter one means the beam walks the same
+   * track more often, so the world absorbs more per day rather than less. Decision `0024`
+   * has the dwell and dose tables; this preset is where it bites.
+   *
+   * Measured at the shipped beam geometry, 60 game-years at 120×72, seed 20260729, sea
+   * share y0 → y60 — the AC2 instrument from spec `2915cb06-3`, whose standing verdict is
+   * ±5 pp over 60 game-years, i.e. ±0.0833 pp/y:
+   *
+   *    150 d traverse   23.81 → 29.78   +0.0995 pp/y   ✗ over the verdict
+   *    200 d traverse   23.81 → 27.23   +0.0571 pp/y   ← shipped
+   *    250 d traverse   23.81 → 25.78   +0.0328 pp/y
+   *
+   * 200 rather than 250 because the margin at 200 is already comfortable and the point of
+   * this preset is that everything is happening at once, not that the sun has been turned
+   * off in all but name.
+   *
+   * against this preset's own pre-spec baseline of 23.81 → 26.37, +0.0426 pp/y. A smaller
+   * sun is the other way to buy the same margin and was measured too — radius 6 at 150 d
+   * gives +0.0405, closest of all to the baseline — but it would put a second beam
+   * geometry in the presets for no gain a player could see. Only the PERIOD differs
+   * between `anvil` and `crucible`, which is the knob decision `0024` says is the
+   * shape-appropriate one to turn.
+   *
+   * Keeping 45 would have flooded the world by 10.7 pp in 60 game-years, twice the
+   * standing verdict, while looking like the conservative choice — because it is the
+   * number that WAS conservative under the previous shape.
+   *
+   * The great year here is 1600 days. That is a long recovery, and it is the point: on a
+   * world where five other cycles are already working the ground, the sun coming back
+   * less often is what keeps the water where it is.
    */
   crucible: [
-    { kind: 'solarbeam', transitDays: 45, cycleDays: 420 },
+    { kind: 'solarbeam', transitDays: 200 },
     { kind: 'seasons' },
     { kind: 'monsoon', phaseDays: 180 },
     { kind: 'tectonics' },

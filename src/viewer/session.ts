@@ -12,7 +12,7 @@
  * playing at 30 days/second.
  */
 
-import { World } from '../sim/world.ts';
+import { World, type WorldSky } from '../sim/world.ts';
 import { assessStability, sample, type Sample, type StabilityVerdict } from '../sim/report.ts';
 import type { CycleSpec } from '../sim/cycles.ts';
 
@@ -85,6 +85,18 @@ export interface SessionStatus {
   msPerDay: number;
   /** The frame's two byte planes, one byte per tile each. The JSON header adds ~500 more. */
   frameBytes: number;
+  /**
+   * Where every beam is right now. Positions only — no forward tracks.
+   *
+   * ★ THE VIEWER DOES NOT COMPUTE THIS. It comes from `World.sky()`, which reads the same
+   * `dayState` the simulation stepped, so the marked sun is the sun that burned the
+   * ground. Decision `0008` records what happens when a second implementation of the
+   * sinusoid exists; a client-side one would be the third.
+   *
+   * A handful of numbers per beam, so unlike a path this costs nothing against the
+   * frame's byte planes — measured at ~250 bytes against 69,120 at 240×144.
+   */
+  sky: WorldSky;
 }
 
 export class ViewerSession {
@@ -235,6 +247,7 @@ export class ViewerSession {
       cycles: this.cycles,
       msPerDay: this.msPerDay,
       frameBytes: this.world.grid.size * 2,
+      sky: this.world.sky(),
     };
   }
 }

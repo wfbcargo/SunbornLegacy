@@ -23,8 +23,19 @@ import {
 } from './biomes.ts';
 import {
   CycleEffect, CycleFlag, SolarBeam, TerrainClass, makeCycle,
-  type CycleForecast, type CycleSpec, type WorldCycle, type WorldView,
+  type BeamSighting, type CycleForecast, type CycleSpec, type WorldCycle, type WorldView,
 } from './cycles.ts';
+
+/**
+ * Where the world's suns are on one day. See `World.sky`.
+ *
+ * ★ POSITIONS ONLY, AND NO FORWARD TRACKS. Where the beam is GOING is meant to be read
+ * off the ground it has already burned, not off a predicted line — decision `0025`.
+ */
+export interface WorldSky {
+  readonly day: number;
+  readonly beams: readonly BeamSighting[];
+}
 
 export const TICKS_PER_DAY = 14_400;
 
@@ -849,6 +860,29 @@ export class World {
   }
 
   /**
+   * Where every sun is today — orientation for anything that draws the world.
+   *
+   * ★ THIS IS NOT HOW THE BEAM IS MEANT TO BE FOLLOWED. The path a player reads is the
+   * SCAR: the glass, ash, lava and desert the beam drags behind it, which is a property
+   * of the simulation and visible in any render of the biome grid. This call exists only
+   * so a viewer can mark where the sun is right now and a reader can check that the trail
+   * and the sun agree. Decision `0025` records why there is no forward track here.
+   *
+   * ★ ALL of them, not the first one. A world may carry several beams out of phase;
+   * `this.beam` answers a different, older question and keeps answering it.
+   */
+  sky(): WorldSky {
+    const day = Math.floor(this.day);
+    const beams: BeamSighting[] = [];
+    for (const cycle of this.cycles) {
+      if (!(cycle instanceof SolarBeam)) continue;
+      const s = cycle.sighting(day);
+      if (s !== null) beams.push(s);
+    }
+    return { day, beams };
+  }
+
+  /**
    * Real days until the beam next reaches a TILE — the warning a player gets.
    *
    * ★ IT TAKES A ROW, and the row is not optional. This used to ask about a column and
@@ -857,9 +891,10 @@ export class World {
    * column-and-row-0 form returned `Infinity` for 172 of 240 columns, because row 0 is
    * simply not where the track was.
    *
-   * ★ `Infinity` IS AN ANSWER, not a failure. The blob's track is periodic and retraces
-   * itself every purge, so a tile it misses is missed for the life of the world. Callers
-   * must render "never", not "unknown" and not "soon".
+   * ★ `Infinity` IS AN ANSWER, not a failure. A blob's track retraces itself after a
+   * GREAT YEAR (`greatYearTraverses` traverses), and the forecast horizon is one, so
+   * `Infinity` now means "this tile is outside the track's reach entirely" — which an
+   * amplitude below 1.0 still produces. Callers must render "never", not "not yet".
    */
   daysUntilBeam(col: number, row: number): number {
     return this.beam?.forecast(col, row, this.day, undefined, this.worldView)?.daysUntil ?? Infinity;

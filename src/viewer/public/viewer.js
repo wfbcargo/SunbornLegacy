@@ -9,6 +9,9 @@ const $ = (id) => document.getElementById(id);
 
 const canvas = $('map');
 const ctx = canvas.getContext('2d', { alpha: false });
+/** The sky overlay — see the comment on the second canvas in index.html. */
+const skyCanvas = $('sky');
+const skyCtx = skyCanvas.getContext('2d');
 
 /** Server-side constants: biome palette, presets, liveness thresholds. */
 let meta = null;
@@ -71,6 +74,24 @@ function buildGeometry(hexR) {
 function resizeCanvas() {
   canvas.width = Math.ceil(geom.w * geom.hexW + geom.hexW / 2);
   canvas.height = Math.ceil((geom.h - 1) * geom.rowStep + 2 * geom.hexR);
+  skyCanvas.width = canvas.width;
+  skyCanvas.height = canvas.height;
+}
+
+/**
+ * Pixel centre of a point given in the sim's own track space.
+ *
+ * `x` is `hexX` — a column plus the half-column an odd row is shifted by — and `row` is
+ * a row, both fractional and both already wrapped to the torus. `buildGeometry` places
+ * tile (col,row) at `(col + (row&1)/2) * hexW + hexW/2`, which is exactly `hexX * hexW +
+ * hexW/2`; so the same expression with the shift already folded in places a track point,
+ * and the drawn sun lands on the hex the simulation burned rather than near it.
+ */
+function skyPoint(x, row) {
+  return {
+    px: x * geom.hexW + geom.hexW / 2,
+    py: row * geom.rowStep + geom.hexR,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +208,79 @@ function drawDiff() {
   return count;
 }
 
+// ---------------------------------------------------------------------------
+// The sky — where each sun is right now, and nothing about where it is going
+// ---------------------------------------------------------------------------
+
+/**
+ * ★ A MARKER, NOT A FORECAST. This draws where the sun IS and nothing about where it is
+ * going. The beam's path is meant to be read off the ground it has already burned — the
+ * glass, ash, lava and desert trailing behind it in the biome grid — which is a property
+ * of the simulation rather than of this file. An earlier draft drew a forward track and
+ * the user corrected it; decision `0025` records what shipped and why.
+ */
+const SKY = {
+  beam: '#ffb648',
+  beamCore: '#fff2c4',
+};
+
+/**
+ * A hex disc, as an ellipse, drawn at every torus offset so one straddling the seam
+ * appears on both sides. Nine cheap draws; the canvas clips the eight that miss.
+ *
+ * Elliptical and not circular because the grid is not square: a hex ring of radius r
+ * reaches `r · hexW` pixels sideways and `r · rowStep` pixels vertically, and rowStep is
+ * 1.5·hexR against hexW's √3·hexR. A circle would overstate the beam's vertical reach by
+ * 15%, which on the beam is the difference between "the wave is that wide" and a guess.
+ */
+function skyDisc(c, x, row, radius, fill) {
+  const rx = (radius + 0.5) * geom.hexW;
+  const ry = (radius + 0.5) * geom.rowStep;
+  const mapW = geom.w * geom.hexW;
+  const mapH = geom.h * geom.rowStep;
+  const { px, py } = skyPoint(x, row);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      c.beginPath();
+      c.ellipse(px + dx * mapW, py + dy * mapH, rx, ry, 0, 0, Math.PI * 2);
+      if (fill) c.fill();
+      else c.stroke();
+    }
+  }
+}
+
+function drawSky() {
+  const c = skyCtx;
+  c.clearRect(0, 0, skyCanvas.width, skyCanvas.height);
+  if (!$('show-sky').checked || status === null || !status.sky) return;
+
+  const scale = Math.max(1, geom.hexR / 3);
+
+  for (const beam of status.sky.beams) {
+    if (beam.shape === 'band') {
+      // A band occupies every row of its columns — `row` is -1 and there is no point to
+      // draw. The honest picture is the columns themselves.
+      const half = (beam.radius + 0.5) * geom.hexW;
+      const px = beam.x * geom.hexW + geom.hexW / 2;
+      c.fillStyle = SKY.beam;
+      c.globalAlpha = 0.18;
+      for (let dx = -1; dx <= 1; dx++) {
+        c.fillRect(px - half + dx * geom.w * geom.hexW, 0, 2 * half, skyCanvas.height);
+      }
+      c.globalAlpha = 1;
+      continue;
+    }
+
+    c.strokeStyle = SKY.beam;
+    c.lineWidth = 1.4 * scale;
+    skyDisc(c, beam.x, beam.row, beam.radius, false);
+    c.fillStyle = SKY.beamCore;
+    c.globalAlpha = 0.9;
+    skyDisc(c, beam.x, beam.row, beam.focusRadius, true);
+    c.globalAlpha = 1;
+  }
+}
+
 let lastDrawMs = 0;
 let lastChanged = 0;
 
@@ -207,6 +301,10 @@ function render() {
     lastChanged = drawDiff();
   }
   lastDrawMs = performance.now() - t0;
+
+  // Always whole, never diffed: the sky moves every day and its old position is not
+  // recoverable from the biome plane the diff is built on.
+  drawSky();
 
   prevBiome = biome.slice();
 }
@@ -267,6 +365,43 @@ async function refresh() {
 // ---------------------------------------------------------------------------
 
 const pct = (v, digits = 1) => `${(v * 100).toFixed(digits)}%`;
+
+/**
+ * Where the sun is, and the one number that makes it predictable.
+ *
+ * The great year is what a player learns: after that many days the beam is back on the
+ * track it started on, so knowing it plus today's day says where the sun will be forever
+ * — and the ground already burned says where it has been. Everything here comes off
+ * `World.sky()`; the client derives none of it.
+ */
+function paintSky() {
+  const el = $('sky-readout');
+  const sky = status.sky;
+  if (!sky || sky.beams.length === 0) {
+    el.innerHTML = '<span>no sun over this world</span>';
+    return;
+  }
+  const rows = [];
+  for (const b of sky.beams) {
+    if (b.shape === 'band') {
+      rows.push(
+        `<div class="row"><span><b>${b.key}</b> a full-height band</span>` +
+          `<span>column ${Math.round(b.x)}</span></div>`,
+      );
+      continue;
+    }
+    const returns = b.greatYearDays - (b.traverse - 1) * b.traversePeriodDays - b.intoTraverse;
+    rows.push(
+      `<div class="row"><span><b>${b.key}</b> at ${Math.round(b.x)}, ${Math.round(b.row)}` +
+        `${b.continuous ? '' : ' (dormant between purges)'}</span></div>` +
+        `<div class="row"><span>traverse ${b.traverse} of ${b.greatYearTraverses}, ` +
+        `day ${Math.round(b.intoTraverse)} of ${b.traversePeriodDays}</span></div>` +
+        `<div class="row"><span>great year ${b.greatYearDays}d — same track again in ` +
+        `${Math.round(returns)}d</span></div>`,
+    );
+  }
+  el.innerHTML = rows.join('');
+}
 
 function syncField(el, value) {
   if (document.activeElement !== el && el.value !== value) el.value = value;
@@ -355,6 +490,7 @@ function paintPanel() {
   }
 
   paintComposition();
+  paintSky();
 
   // Keep the form showing the world that actually exists. The server is the source of
   // truth for seed, size and cycles, not the boxes — a second tab, or a restart against
@@ -1062,6 +1198,12 @@ $('zoom').addEventListener('input', (e) => {
   geomDirty = true;
   render();
   paintPanel();
+});
+
+// Only the overlay is affected, so the map is not repainted — toggling the sky on a
+// 480×288 world should not cost a full 138,240-hex redraw.
+$('show-sky').addEventListener('change', () => {
+  if (geom !== null) drawSky();
 });
 
 document.addEventListener('keydown', (e) => {

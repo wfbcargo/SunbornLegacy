@@ -75,12 +75,55 @@ main {
     repeating-linear-gradient(45deg, #0e0f13 0 8px, #0b0c0f 8px 16px);
 }
 
+/*
+  The stack exists so the sky canvas can sit exactly on the map without the scroll
+  container's padding having to be duplicated into a pixel offset. `inline-block` makes
+  it shrink to the map's size, which is what the overlay's absolute origin is measured
+  from.
+*/
+#canvas-stack {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+}
+
 #map {
   display: block;
   image-rendering: auto;
   box-shadow: 0 0 0 1px var(--line);
   cursor: crosshair;
 }
+
+/* Never intercepts the pointer: the hover readout reads the MAP's bounding rect. */
+#sky {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--dim);
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.check input { margin-top: 1px; flex: none; }
+
+.sky-readout {
+  margin-top: 10px;
+  font-size: 10px;
+  line-height: 1.7;
+  color: var(--faint);
+}
+
+.sky-readout b { color: var(--ink); font-weight: 600; }
+.sky-readout .row { display: flex; justify-content: space-between; gap: 10px; }
 
 .readout {
   flex: none;
