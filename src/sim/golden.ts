@@ -86,7 +86,7 @@ const CASES: readonly GoldenCase[] = [
     height: 96,
     seed: 20260729,
     days: 500,
-    hash: '10468117cccd7501',
+    hash: '3bc4c35b1b99adc7',
   },
   {
     name: 'crucible',
@@ -95,7 +95,7 @@ const CASES: readonly GoldenCase[] = [
     height: 96,
     seed: 20260729,
     days: 500,
-    hash: '0a1c093d0850b2ad',
+    hash: '406cbd9ca84e3e3f',
   },
 ];
 

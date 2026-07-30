@@ -1,7 +1,15 @@
 # 0010 — Maritime reach is a daily field, not neighbour diffusion
 
 Date: 2026-07-29
-Status: accepted
+Status: **superseded by `0026`** (2026-07-30) — the BFS field described below has been
+deleted. **The measurement in it is still true and is still the reason not to write
+`target = H + m·ā`; read it before proposing any neighbour coupling.** What `0026` changed is
+narrower than "diffusion works after all": a *Laplacian* (`κ·(mean(T_nb) − T)`) vanishes in a
+uniform region where the blend-toward-mean-anomaly form does not, so it cannot multiply the
+global time constant and cannot latch the world the way the prototype below did. It also does
+**not** reproduce this field's reach — measured 3 hexes and −23.60% at the shoreline against
+this field's 4 hexes and −33.45%. The field was removed because it was measured to add
+**0.16 pp** on top of the Laplacian, not because the Laplacian matched it.
 Spec: `2915cb06-2_thermal-inertia`
 Decided by: `impl-thermal-inertia-7b3c05`
 

@@ -91,33 +91,50 @@ export interface BiomeDef {
    * build a latch, and a latch is an absorbing state wearing a climate costume.
    */
   readonly selfHeat: number;
+  /**
+   * Thermal mass, as the per-day relaxation rate toward this tile's OWN equilibrium:
+   * `T += thermalAlpha * (H - T)`. LOW is heavy — deep water at 0.023 is a ~43-day time
+   * constant, dry sand at 0.60 settles in two days.
+   *
+   * ★ THE WATER/LAND RATIO IS THE MEASURED ANCHOR, NOT THE INDIVIDUAL NUMBERS. 0.023
+   * against a land mean near 0.4 is the ~20× that puts the sea's seasonal peak ~37 days
+   * behind the land's at ~80% of its amplitude, and that lag is the anomaly the coastline
+   * reads as a maritime climate. Retuning one land biome is cheap; collapsing the ratio
+   * deletes the feature.
+   *
+   * ★ AND IT IS BOUNDED WITH `THERMAL_KAPPA`. The explicit scheme in `world.ts` needs
+   * `thermalAlpha + THERMAL_KAPPA <= 1` for EVERY biome or it oscillates and then
+   * diverges, and `world.ts` throws at module evaluation if any row breaks it. Raising a
+   * value here is therefore a change to the diffusion budget, not a local edit.
+   */
+  readonly thermalAlpha: number;
   /** What a region of this biome can export. The economy's supply side. */
   readonly materials: readonly string[];
 }
 
 export const BIOMES: readonly BiomeDef[] = [
-  { id: Biome.Ocean,      key: 'ocean',      name: 'Deep Ocean',   glyph: '~', colour: 19,  water: true,  molten: false, moistureSource: 100, vegetated: false, stone: false, selfHeat: 0,   materials: ['brine', 'kelp', 'deepfish'] },
-  { id: Biome.Shallows,   key: 'shallows',   name: 'Shallows',     glyph: '-', colour: 45,  water: true,  molten: false, moistureSource: 100, vegetated: false, stone: false, selfHeat: 0,   materials: ['coral', 'pearl', 'seasalt'] },
-  { id: Biome.FrozenSea,  key: 'frozensea',  name: 'Frozen Sea',   glyph: '_', colour: 117, water: true,  molten: false, moistureSource: 55,  vegetated: false, stone: false, selfHeat: 0,   materials: ['packice', 'krilloil', 'coldlight'] },
-  { id: Biome.Marsh,      key: 'marsh',      name: 'Cool Marsh',   glyph: '%', colour: 65,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['reed', 'peat', 'clay'] },
-  { id: Biome.Swamp,      key: 'swamp',      name: 'Warm Swamp',   glyph: '&', colour: 58,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['mangrove', 'bogiron', 'lampcap'] },
-  { id: Biome.Grassland,  key: 'grassland',  name: 'Grassland',    glyph: '"', colour: 149, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['grain', 'fiber', 'herb'] },
-  { id: Biome.Savanna,    key: 'savanna',    name: 'Savanna',      glyph: ';', colour: 179, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['thatch', 'ochre', 'sunhide'] },
-  { id: Biome.Forest,     key: 'forest',     name: 'Forest',       glyph: '#', colour: 28,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['timber', 'resin', 'game'] },
-  { id: Biome.Rainforest, key: 'rainforest', name: 'Rainforest',   glyph: '@', colour: 22,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['ironwood', 'vinesilk', 'dewfruit'] },
-  { id: Biome.Bloom,      key: 'bloom',      name: 'Bloom',        glyph: '*', colour: 213, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['sunpetal', 'nectar', 'essence', 'aureole'] },
-  { id: Biome.Tundra,     key: 'tundra',     name: 'Tundra',       glyph: ':', colour: 152, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0,   materials: ['frostmoss', 'rime', 'pelt'] },
-  { id: Biome.Glacier,    key: 'glacier',    name: 'Glacier',      glyph: 'A', colour: 231, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['blueice', 'meltwater', 'ivory'] },
-  { id: Biome.Desert,     key: 'desert',     name: 'Desert',       glyph: '.', colour: 222, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['sand', 'saltpeter', 'sunstone'] },
-  { id: Biome.Badlands,   key: 'badlands',   name: 'Badlands',     glyph: 'v', colour: 166, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0,   materials: ['shale', 'gypsum', 'fossilbone'] },
-  { id: Biome.Mountain,   key: 'mountain',   name: 'Mountain',     glyph: '^', colour: 250, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: -18, materials: ['granite', 'silver', 'skyquartz'] },
-  { id: Biome.Rock,       key: 'rock',       name: 'Rock',         glyph: 'n', colour: 245, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0,   materials: ['iron', 'stone', 'copper'] },
-  { id: Biome.Basalt,     key: 'basalt',     name: 'Basalt',       glyph: '0', colour: 235, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0,   materials: ['blackstone', 'olivine', 'magnetite'] },
-  { id: Biome.Lava,       key: 'lava',       name: 'Lava',         glyph: '!', colour: 196, water: true,  molten: true,  moistureSource: 0,   vegetated: false, stone: false, selfHeat: 25,  materials: ['obsidian', 'sulfur', 'firesalt'] },
-  { id: Biome.Ash,        key: 'ash',        name: 'Ash',          glyph: 'x', colour: 240, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['potash', 'char', 'cinder'] },
-  { id: Biome.Glass,      key: 'glass',      name: 'Glass',        glyph: '=', colour: 195, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0,   materials: ['silica', 'glasslite', 'prism'] },
-  { id: Biome.Soil,       key: 'soil',       name: 'Fertile Soil', glyph: '+', colour: 94,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['loam', 'humus', 'quickvine'] },
-  { id: Biome.Barren,     key: 'barren',     name: 'Barren',       glyph: ',', colour: 101, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['dust', 'gravel', 'scrap'] },
+  { id: Biome.Ocean,      key: 'ocean',      name: 'Deep Ocean',   glyph: '~', colour: 19,  water: true,  molten: false, moistureSource: 100, vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.023, materials: ['brine', 'kelp', 'deepfish'] },
+  { id: Biome.Shallows,   key: 'shallows',   name: 'Shallows',     glyph: '-', colour: 45,  water: true,  molten: false, moistureSource: 100, vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.023, materials: ['coral', 'pearl', 'seasalt'] },
+  { id: Biome.FrozenSea,  key: 'frozensea',  name: 'Frozen Sea',   glyph: '_', colour: 117, water: true,  molten: false, moistureSource: 55,  vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.023, materials: ['packice', 'krilloil', 'coldlight'] },
+  { id: Biome.Marsh,      key: 'marsh',      name: 'Cool Marsh',   glyph: '%', colour: 65,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.30,  materials: ['reed', 'peat', 'clay'] },
+  { id: Biome.Swamp,      key: 'swamp',      name: 'Warm Swamp',   glyph: '&', colour: 58,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.30,  materials: ['mangrove', 'bogiron', 'lampcap'] },
+  { id: Biome.Grassland,  key: 'grassland',  name: 'Grassland',    glyph: '"', colour: 149, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.40,  materials: ['grain', 'fiber', 'herb'] },
+  { id: Biome.Savanna,    key: 'savanna',    name: 'Savanna',      glyph: ';', colour: 179, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.45,  materials: ['thatch', 'ochre', 'sunhide'] },
+  { id: Biome.Forest,     key: 'forest',     name: 'Forest',       glyph: '#', colour: 28,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.35,  materials: ['timber', 'resin', 'game'] },
+  { id: Biome.Rainforest, key: 'rainforest', name: 'Rainforest',   glyph: '@', colour: 22,  water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.35,  materials: ['ironwood', 'vinesilk', 'dewfruit'] },
+  { id: Biome.Bloom,      key: 'bloom',      name: 'Bloom',        glyph: '*', colour: 213, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.40,  materials: ['sunpetal', 'nectar', 'essence', 'aureole'] },
+  { id: Biome.Tundra,     key: 'tundra',     name: 'Tundra',       glyph: ':', colour: 152, water: false, molten: false, moistureSource: 0,   vegetated: true,  stone: false, selfHeat: 0, thermalAlpha: 0.40,  materials: ['frostmoss', 'rime', 'pelt'] },
+  { id: Biome.Glacier,    key: 'glacier',    name: 'Glacier',      glyph: 'A', colour: 231, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.15,  materials: ['blueice', 'meltwater', 'ivory'] },
+  { id: Biome.Desert,     key: 'desert',     name: 'Desert',       glyph: '.', colour: 222, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.60,  materials: ['sand', 'saltpeter', 'sunstone'] },
+  { id: Biome.Badlands,   key: 'badlands',   name: 'Badlands',     glyph: 'v', colour: 166, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0, thermalAlpha: 0.30,  materials: ['shale', 'gypsum', 'fossilbone'] },
+  { id: Biome.Mountain,   key: 'mountain',   name: 'Mountain',     glyph: '^', colour: 250, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: -18, thermalAlpha: 0.25,  materials: ['granite', 'silver', 'skyquartz'] },
+  { id: Biome.Rock,       key: 'rock',       name: 'Rock',         glyph: 'n', colour: 245, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0, thermalAlpha: 0.25,  materials: ['iron', 'stone', 'copper'] },
+  { id: Biome.Basalt,     key: 'basalt',     name: 'Basalt',       glyph: '0', colour: 235, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0, thermalAlpha: 0.28,  materials: ['blackstone', 'olivine', 'magnetite'] },
+  { id: Biome.Lava,       key: 'lava',       name: 'Lava',         glyph: '!', colour: 196, water: true,  molten: true,  moistureSource: 0,   vegetated: false, stone: false, selfHeat: 25, thermalAlpha: 0.50,  materials: ['obsidian', 'sulfur', 'firesalt'] },
+  { id: Biome.Ash,        key: 'ash',        name: 'Ash',          glyph: 'x', colour: 240, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.60,  materials: ['potash', 'char', 'cinder'] },
+  { id: Biome.Glass,      key: 'glass',      name: 'Glass',        glyph: '=', colour: 195, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0, thermalAlpha: 0.35,  materials: ['silica', 'glasslite', 'prism'] },
+  { id: Biome.Soil,       key: 'soil',       name: 'Fertile Soil', glyph: '+', colour: 94,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.55,  materials: ['loam', 'humus', 'quickvine'] },
+  { id: Biome.Barren,     key: 'barren',     name: 'Barren',       glyph: ',', colour: 101, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.60,  materials: ['dust', 'gravel', 'scrap'] },
   // ★ `water: false` IS A SAFETY PROPERTY, NOT A CLASSIFICATION PREFERENCE. See decision
   // `0019`. A river read as sea drowns itself — a chain tile has two river neighbours, so
   // at any bend it reads `waterNeighbours >= 3` and its own mouth rule fires — and every
@@ -126,7 +143,7 @@ export const BIOMES: readonly BiomeDef[] = [
   // is annihilated) AND the water trend went from flat to +1.5 pp in four game-years.
   // `moistureSource` must stay 0 with it: `invariants.ts` fails a source that is not water,
   // so a half-done version is loud rather than silent.
-  { id: Biome.River,      key: 'river',      name: 'River',        glyph: '/', colour: 39,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['silt', 'watercress', 'rivergold'] },
+  { id: Biome.River,      key: 'river',      name: 'River',        glyph: '/', colour: 39,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0, thermalAlpha: 0.15,  materials: ['silt', 'watercress', 'rivergold'] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -624,9 +641,15 @@ const RULE_DEFS: readonly RuleDef[] = [
   // =========================================================================
 
   // -- THE BEAM: the Sun God shapes ------------------------------------------
-  // He remakes; he does not annihilate. The beam boils water back from the edges,
-  // but DEEP OCEAN SURVIVES A PURGE. If deep water can be destroyed, every purge
-  // permanently removes the world's moisture source and the map ends as glass.
+  // He remakes; he does not annihilate. The beam boils water back from the edges.
+  //
+  // ★ "DEEP OCEAN SURVIVES A PURGE" WAS THE RULE HERE AND IS NOW NARROWER — the two
+  // rules below still cannot touch open water, and the CORE can (see `the core boils it
+  // dry`). The superseded reasoning, kept because it names a real failure mode: *if deep
+  // water can be destroyed, every purge permanently removes the world's moisture source
+  // and the map ends as glass.* That holds for any rule that destroys water PERMANENTLY.
+  // What makes the core's rule survivable is the return path, not a smaller number, and
+  // it is measured rather than argued — decision `0027`.
   {
     from: Biome.Ocean, to: Biome.Shallows, medianDays: 10, label: 'the sea boils back',
     when: (c) => (has(c, CycleFlag.Beam) && c.waterNeighbours <= 4 ? 1 : 0),
@@ -634,6 +657,75 @@ const RULE_DEFS: readonly RuleDef[] = [
   {
     from: Biome.Shallows, to: Biome.Barren, medianDays: 5, label: 'seabed bared',
     when: (c) => (has(c, CycleFlag.Beam) && c.waterNeighbours <= 2 ? 1 : 0),
+  },
+
+  // -- THE CORE: open water boils, and the gate is `Focus`, never heat --------
+  //
+  // These two sit AFTER the pair above deliberately. First rule to fire wins, so where
+  // an edge rule already applies it keeps applying at the rate it was validated at;
+  // these only reach the water that had no beam-driven exit at all. Measured on the
+  // current tree, 240×144 over 240 days: of the water the core lights, **93% has all six
+  // neighbours water on `anvil` and 85% on `crucible`** — that is what had no exit.
+  //
+  // ★ WHY THE GATE IS `Focus` AND NOT A TEMPERATURE. Not for want of heat: the same run
+  // reads a mean of **148.3** under the core with a hottest of **181.5**, against
+  // SCORCHING 78 / VITRIFY 110 / MOLTEN 120. The water is already far past the point
+  // where ROCK melts. Heat is not what is missing, and adding a heat gate would be
+  // actively unsafe: `world.ts` gives every open-water neighbour −3.0 heat, so
+  // converting one sea tile to land adds **+4.2** to each remaining adjacent sea tile.
+  // A heat-gated evaporation rule MANUFACTURES ITS OWN NEXT TRIGGER, with measured gain
+  // above one — halving `garden`'s sea produced ~3.5× more above-threshold exposure per
+  // remaining sea tile, which is why spec `2915cb06-3` gated `the shallows bake dry` on
+  // geometry instead. `Focus` closes that loop by construction: boiling water still
+  // raises the neighbours' heat, but heat is not the trigger, so **no new trigger is
+  // created**. It is the same trick `melting()` uses one section down, for the same
+  // reason, and it is the whole safety argument. If a reviewer cannot see the flag in
+  // the `when`, this comment is wrong.
+  //
+  // ★ `waterNeighbours >= 4` IS THE RECLAIMABILITY CONDITION, AND IT RUNS THE OPPOSITE
+  // WAY TO EVERY GATE ABOVE. `the sea boils back` and `seabed bared` ask how ENCLOSED a
+  // tile is (`<= 4`, `<= 2`); this asks that it still be mostly SURROUNDED BY WATER, which
+  // is exactly what `sea takes it` needs to take it back (`>= 4`, median 14 at pressure 3
+  // here). Open ocean is 6 and sails through, so the requested behaviour is untouched.
+  // What it forbids is a patch thick enough to have an INTERIOR: tiles inside a boiled
+  // blob fall below 4 and stop boiling, so the scar stays thin and every tile in it is
+  // reachable by the sea from the day it was made.
+  //
+  // ★ ★ THE MEDIAN IS THE BUDGET. THE RETURN PATH IS NOT. This is the finding of spec
+  // `a966588d` Part B and it contradicts what that spec was written expecting, so read it
+  // before shortening this number. Measured over 60 game-years at 120×72, this edge's
+  // contribution against the pre-Part-B trend:
+  //
+  //     median  3   crucible -0.29   anvil -0.18       <- drains the ocean to 9.7%
+  //     median  8   crucible -0.13   anvil -0.08
+  //     median 20   crucible -0.02   anvil -0.06       <- what runs
+  //
+  // A dedicated fast reclaim edge (`desert -> shallows`, median 2 at `wn >= 5`) was built
+  // and measured, and it moved `crucible` at median 3 only from -0.31 to -0.28. The reason
+  // is one line away: `sand to glass` fires at MEDIAN 1 under the same beam, so a boiled
+  // tile is STONE within a day, and stone comes back through `the sea undercuts it` at
+  // median 26 rather than 14 — with further exits into lava and basalt. **No product
+  // choice avoids that chain while the beam is still overhead.** So a fraction of every
+  // conversion leaks into permanent land whatever the geometry, which is exactly what
+  // `SIMULATION.md` already said: every new water<->land edge is a pure ratchet whose
+  // full magnitude accumulates linearly.
+  //
+  // ★ WHAT THIS COSTS AND WHAT IT BUYS. At median 20 the core converts ~3% of the water
+  // it lights, so the ocean does NOT visibly boil — the requested image is not delivered,
+  // deliberately, and the tradeoff table above is why. What it does buy is the thing
+  // invariant 8 had been exempting since the beginning: deep-ocean interiors finally have
+  // a live out-rule. `anvil`'s no-exit share falls **14.51% -> 8.61%** and `crucible`'s
+  // **5.87% -> 4.43%**. Decision `0027`.
+  //
+  // Authored by hand on the two true-water biomes, not fanned out: frozen sea already
+  // has `ice sheet melts out`, and lava is `water` for flow's purposes only.
+  {
+    from: Biome.Ocean, to: Biome.Desert, medianDays: 20, label: 'the core boils it dry',
+    when: (c) => (has(c, CycleFlag.Focus) && c.waterNeighbours >= 4 ? 1 : 0),
+  },
+  {
+    from: Biome.Shallows, to: Biome.Desert, medianDays: 20, label: 'the core boils it dry',
+    when: (c) => (has(c, CycleFlag.Focus) && c.waterNeighbours >= 4 ? 1 : 0),
   },
   {
     from: Biome.FrozenSea, to: Biome.Shallows, medianDays: 2, label: 'ice sheet melts out',

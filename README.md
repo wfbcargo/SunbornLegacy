@@ -102,10 +102,23 @@ devDependencies. The simulator and viewer run from a bare checkout.
     coverage load-bearing twice: a beam that burns everything leaves no trail. `radiusHexes`
     is a first-class GM knob with a measured table behind it. `shape: 'band'` is kept and
     scoped, not deleted. Decisions `0007`, `0008`, `0023`, `0024`, `0025`.
-  - **A sea whose temperature reaches inland.** Per-tile stored temperature with thermal
-    inertia, a per-day BFS proximity field with distance falloff, and seasons moved onto a
-    separate ambient channel so an acute purge is not low-passed into nothing. Decisions
-    `0009`–`0011`.
+  - **A sun whose core boils open ocean.** `the core boils it dry` gives deep water its first
+    beam-driven exit at any temperature — gated on the `Focus` flag, never on heat, so that
+    destroying water cannot manufacture its own next trigger. It is what finally gives Deep
+    Ocean interiors a live out-rule: invariant 8's no-exit share falls **14.51% → 8.61%** on
+    `anvil`. ⚠️ **It is deliberately tuned below visibility** — at median 20 the core converts
+    ~3% of the water it lights, so the ocean does not visibly boil. The dramatic setting drains
+    `crucible` from 23.8% to 9.7% sea over 60 game-years; the tradeoff table is in decision
+    `0027` and in the rule's own comment. Decision `0027`.
+  - **A sea whose temperature reaches inland.** Per-tile stored temperature with **per-biome**
+    thermal mass (`BiomeDef.thermalAlpha` — deep water 0.023 against dry sand 0.60), a
+    **snapshot-based neighbour exchange** `T += κ·(mean(T_nb) − T)` resolved once a day at the
+    day boundary, and seasons on a separate ambient channel so an acute purge is not
+    low-passed into nothing. The Laplacian form is what makes it safe: it is exactly zero in a
+    uniform region, so unlike the blend-toward-mean-anomaly form it cannot multiply the global
+    time constant and latch the polar cap. It replaced the per-day BFS proximity field, which
+    was measured to add 0.16 pp to the shoreline signature on top of it. Decisions
+    `0009`–`0011`, `0026`.
 - **`src/viewer/`** — a local world viewer: the hex map on a canvas, play/pause/step,
   hover readout, live liveness metrics, and a **cycle composer** — assemble any set of
   cycles (including two of the same kind out of phase), read what each one does to a world,
@@ -116,7 +129,7 @@ devDependencies. The simulator and viewer run from a bare checkout.
   npm run viewer -- --width 320 --height 192 --seed 7 --cycles garden
   ```
 
-### Validated — 2026-07-30, re-measured in one pass after epic `2915cb06`
+### Validated — 2026-07-30, re-measured in one pass after spec `a966588d` Part A
 Five sequential specs each moved the world and each re-baselined the golden hashes, and none
 of them was allowed to touch this file. **Nothing below is carried forward from any of them;
 all of it comes from runs made on the final tree, in one pass.** That discipline is not
@@ -133,22 +146,31 @@ trees, one of which reached GM-facing text (`SIMULATION.md` bug #16). 240 × 144
   edges, 29.2% density), all 185 rules satisfiable, every biome escapable without cycles, 10
   required chemistry edges, no latched biome family on any live preset, and 1.000
   evaluations/column/day at all ten width × band combinations.
-- `npm run sim:golden` — **2 golden worlds unchanged**, each verified deterministic across two
-  independent builds: `still` `10468117cccd7501`, `crucible` `599d7815137a0a4f`.
-- `node src/sim/run.ts --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.772,
-  churn 3.65%, largest biome Deep Ocean 17.7%, 15 biomes above 1%; 83 habitable regions,
-  0 generic and 0 thin, median 18 materials.
+- `npm run sim:golden` — **2 golden worlds re-baselined and then verified**, each deterministic
+  across two independent builds: `still` `3bc4c35b1b99adc7`, `crucible` `406cbd9ca84e3e3f`.
+  Part A's thermal change moved both; Part B moved `crucible` only, and `still` holding still
+  is the self-check that matters — `still` raises no `Focus` flag, so the beam's new rule
+  cannot fire there and a hash that moved would have meant the gate was wrong.
+- `node src/sim/run.ts --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.769,
+  churn 3.42%, largest biome Deep Ocean 17.9%, 14 biomes above 1%; 82 habitable regions,
+  0 generic and 0 thin, median 21 materials.
 - `node src/sim/run.ts --days 1500 --cycles still` — **the control correctly FAILS**
-  (entropy 0.637, churn 0.05%, 15 generic and 19 thin regions, flagged as heat death).
+  (entropy 0.636, churn 0.05%, flagged as heat death on both counts).
   This is the important one: it proves the test discriminates.
-- The other three presets at 1500 days all pass both tests: `kiln` 0.755 / 3.25%, `anvil`
-  0.728 / 1.51%, `garden` 0.723 / 3.17%.
+- The other three presets at 1500 days all pass both tests: `kiln` 0.754 / 3.24%, `anvil`
+  0.743 / 1.18%, `garden` 0.724 / 3.20%.
 - `npm run sim:sweep` — **the coastline is a two-way membrane on every cycle set**, inside
-  ±5 pp over 40 game-years. Sea share y0 → y40: `still` 23.8 → 22.2%, `anvil` 23.8 → 25.2%,
-  `garden` 23.8 → 22.0%, `kiln` 23.8 → 22.0%, `crucible` 23.8 → 26.3%. Corrected churn column:
-  `still` 0.05%, `anvil` 1.27%, `garden` 2.35%, `kiln` 2.55%, `crucible` 2.95% — a **63×** spread
-  between the control and the fullest cycle set. **Read the caveat in `SIMULATION.md`**: the
-  membrane has no restoring force, and that one is recorded, not fixed.
+  ±5 pp over 40 game-years. Sea share y0 → y40: `still` 23.8 → 22.1%, `anvil` 23.8 → 24.2%,
+  `garden` 23.8 → 21.3%, `kiln` 23.8 → 21.6%, `crucible` 23.8 → 25.2%. Churn column:
+  `still` 0.05%, `anvil` 1.44%, `garden` 2.39%, `kiln` 2.60%, `crucible` 2.70% — a **54×** spread
+  between the control and the fullest cycle set.
+
+  ★ **Part B made the coastline far busier without moving it.** Gross flux on `anvil` went
+  land→sea 0.158 / sea→land 0.082 to **1.063 / 1.052**, a net of **0.5% of gross**; `crucible`
+  reads 1.791 / 1.755, **1.0% of gross**. The beam's core opens holes in open ocean and the sea
+  closes them, roughly seven times a game-year per hundred tiles of world, and almost exactly
+  cancels. **Read the caveat in `SIMULATION.md`** all the same: the membrane still has no
+  restoring force, and a near-perfect cancellation is not the same as a stable one.
 
   The documentation pass that produced this section also found the sweep dividing its churn
   delta by the wrong interval — the control was reading 12× its true churn and **spuriously
@@ -174,9 +196,13 @@ by 0.985823. Measured today, the control fails entropy by **0.0133** (0.637 agai
 0.6459 and **fails too**, by 0.0041.
 
 ⚠️ **The denominator widened a failure that was already there — it did not create one.** That
-is provable, not argued: `still` holds no river tiles at all, and its golden hash has been
-`10468117cccd7501` since spec 2, unchanged by specs 3, 4 and 5. The control's world is the same
-world; only the divisor moved. The often-repeated pre-epic margin of "0.003" is **not** quoted
+is provable, not argued: `still` holds no river tiles at all, and its golden hash was
+`10468117cccd7501` from spec 2 through spec `0280c42b`, unchanged by specs 3, 4 and 5. The
+control's world was the same world across all of them; only the divisor moved. *(That hash is
+now `3bc4c35b1b99adc7` — spec `a966588d` Part A changed the thermal scheme, which is the first
+thing since spec 2 that could move a world with no cycles in it. The argument above is about
+the river epic and is unaffected; the entropy figures beside it were re-measured on the current
+tree.)* The often-repeated pre-epic margin of "0.003" is **not** quoted
 here, because it was taken on a tree whose control has since changed and the figures recorded
 mid-epic used a 1200-day horizon rather than 1500 — comparing them would be the defect in
 `SIMULATION.md` bug #16, which this epic committed four times.

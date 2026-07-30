@@ -1,6 +1,6 @@
 # Spec a966588d — Neighbour-coupled temperature, and a sun that boils open water
 
-Status: **not started** · Target: `main` · Written 2026-07-30 · Written to be picked up cold
+Status: **COMPLETE — Parts A and B landed 2026-07-30** · Target: `main` · Written 2026-07-30
 
 Two changes that interact and should land together, in this order. Part A rewrites how a
 tile's temperature is computed. Part B lets the beam's core destroy open ocean. They interact
@@ -28,7 +28,27 @@ because the beam's acute heat is applied *on top of* whatever Part A produces.
 Writing `npm run sim --days 1500` silently runs the default world; that mistake once
 invalidated this repo's own recorded evidence.
 
-### Baseline as of `948b49f` (2026-07-30) — verify, do not trust
+### ⚠️ PART B: USE THE POST-PART-A BASELINE BELOW, NOT THE `948b49f` BLOCK
+
+Part A rewrote the climate filter, so every figure in the `948b49f` block is stale. Measured
+on the post-Part-A tree, and these are the numbers Part B measures against:
+
+```
+goldens      still 3bc4c35b1b99adc7 · crucible 4bc5ea27c0744876
+liveness     crucible 0.769 / 3.42%   kiln 0.753 / 3.23%   anvil 0.743 / 1.19%
+             garden 0.724 / 3.20%     still 0.636 / 0.05% FAILS both ✓
+invariant 8  crucible 5.87% · kiln 7.30% · garden 8.18% · anvil 14.51% · still 92.42%
+             largest non-ocean offender: garden grassland 0.60% of a 2.00% limit
+thermal      BiomeDef.thermalAlpha per biome (water 0.023, sand 0.60) · THERMAL_KAPPA 0.30
+             maritime BFS DELETED — no WATER_COUPLING / WATER_REACH / waterDist
+water trend  120×72, 60 game-years, pp/world/game-year:
+             still −0.0287 · anvil +0.0567 · garden −0.0382 · kiln −0.0255 · crucible +0.0530
+coastal      shoreline d=1 −23.60% vs the d=6..12 plateau · reach 3 hexes
+```
+
+Epic-standing water budget ceilings, unchanged: **0.05 pp/y per new edge, 0.125 pp/y total.**
+
+### Baseline as of `948b49f` (2026-07-30) — ★ SUPERSEDED, kept for provenance
 
 ```
 goldens      still 10468117cccd7501 · crucible 0a1c093d0850b2ad
@@ -172,7 +192,36 @@ against `melting()`'s `heat > MOLTEN (120)` gate. At α=0.5 a one-day +115 impul
 +57.5 and **nothing on the world ever melts again**. Do not route acute heat through the
 Laplacian.
 
-## Part A acceptance criteria
+## Part A acceptance criteria — ★ ALL MET, 2026-07-30
+
+Measured on the post-Part-A tree. Full evidence in decision `0026`.
+
+1. **Polar cap breathes.** `garden`, 3 measured years after a 1200-day settle: frozensea
+   5.44 / 5.27 / 5.12%, glacier 7.64 / 7.68 / 8.08%, mean annual max heat 33.24 / 33.20 /
+   33.16 against `ICE_THAW` 28, and **0.00% of sea-ice tiles failed to thaw** in every year.
+   Summers got *warmer* by ~0.95 — the opposite direction to the attempt that latched.
+2. **All invariants hold on all five presets**, invariant 8 included; figures above.
+3. **Coastal amplitude falls monotonically** d=1→5 (14.81 · 16.22 · 17.68 · 18.94 · 19.32),
+   then plateaus. Shoreline depression −23.60%.
+4. **Melt chemistry intact.** `crucible` glass 4.529 → 4.425, basalt 1.348 → 1.299, lava
+   0.265 → 0.260, mountain 1.265 → 1.234, shallows 0.994 → 1.020.
+5. **`still` still FAILS** both tests (0.636 / 0.05%). All five presets reported above.
+6. **`α_i + κ ≤ 1` enforced by a throw** at module evaluation in `world.ts`, per biome.
+7. **Determinism holds**: two independent worlds at one seed, 600d, `garden` and `crucible` —
+   zero biome diffs, zero temperature diffs.
+8. `npm run typecheck` green; goldens re-baselined; `SIMULATION.md` + `README.md` updated in
+   the same commit.
+9. **Reach 3 hexes, and the BFS field was removed.** Not because the Laplacian reproduced its
+   reach — it does not (3 hexes / −23.60% against the field's 4 / −33.45%) — but because with
+   the Laplacian in place the field was measured to add **0.16 pp**. κ cannot buy the
+   difference back: at 0.40 the shoreline reads −22.62%, weaker, reach still 3.
+
+★ **The one thing to escalate on if it matters: the maritime signature is ~10 pp weaker than
+it was** (−23.60% against −33.45%). Acceptance 3 is met and nothing latched, but this is a
+real reduction in a shipped product property. The lever is *lower land `thermalAlpha`*
+(reach goes as `√(κ/α)`), not higher κ, and it spends from invariant 8's headroom.
+
+## Part A acceptance criteria (as written)
 
 1. **The polar cap still breathes.** This is the test that killed the last attempt. On `garden`,
    sampled over ≥3000 days: report `frozensea` and `glacier` share, sea-ice annual maximum
@@ -285,7 +334,51 @@ is correct and desirable. It does **not** weaken Part B, because acute beam heat
 filter (A4), so the core still reads 150+ over water. Verify both properties coexist rather than
 assuming it.
 
-## Part B acceptance criteria
+## Part B acceptance criteria — 7 of 8 met; **criterion 1 deliberately NOT met**
+
+Measured on the final tree. Full evidence in decision `0027`.
+
+1. ✗ **The core does NOT visibly boil open ocean.** This is an escalated, accepted miss, not
+   an oversight. At the shipped median 20 the core converts ~3% of the water it lights, so an
+   ASCII render of open water under the core shows an unbroken sea. The dramatic setting was
+   built and measured; it drains `crucible` from 23.81% to **9.69%** sea over 60 game-years,
+   roughly twice the aggregate ceiling. The user chose the budget-safe setting with the
+   tradeoff table in front of them.
+2. ✓ **The scar closes.** `anvil`, daily resolution, against a no-rule control on the same
+   world: openings 22 → 725/game-year, **89.8% closing** (control 4.5%), **median 11 days to
+   close** (control 185), peak simultaneous 0.764% of world. Measured at median 3, where there
+   is enough population to measure; the shipped median 20 is the same mechanism, sparser.
+3. ✓ **Net water trend inside the ceiling on all five presets**, 60 game-years:
+   `still` −0.0287 · `anvil` −0.0002 · `garden` −0.0382 · `kiln` −0.0255 · `crucible` +0.0353.
+   ⚠️ The edge's *per-edge* contribution is 0.018 on `crucible` but **0.057 on `anvil`, over
+   the 0.05 per-edge ceiling** — recorded, not rounded.
+4. ✓ **All invariants hold**, single SCC preserved on `kiln`/`crucible` (live edges 148 → 149).
+   ★ Invariant 8 **improved**: Deep Ocean interiors finally have a live out-rule, so `anvil`
+   fell 14.51% → **8.61%**, `crucible` 5.87% → **4.43%**, `kiln` 7.30% → **6.66%**.
+5. ✓ **`still` still FAILS** (0.636 / 0.05%). Its golden hash did not move at all, which is
+   the sharper check: no beam ⇒ no `Focus` ⇒ this rule cannot fire.
+6. ✓ **Gated on `Focus`, not on temperature** — visible in the `when` at a glance.
+7. ✓ Goldens re-baselined (`crucible` `4bc5ea27c0744876` → `406cbd9ca84e3e3f`);
+   `SIMULATION.md` and `README.md` updated in the same commit.
+8. ✓ Decision `0027` covers both required entries, and marks the superseded "deep ocean
+   survives a purge" reasoning in `biomes.ts` rather than deleting it.
+
+### ★ The spec's B2 thesis is measurably wrong, and this is the finding
+
+B2 argued *"The resolution is the return path, not a smaller number."* It is the other way
+round. A dedicated fast reclaim edge (`desert → shallows`, median 2 at `wn >= 5`) was built
+and measured: at median 3 it moved `crucible` only from **−0.308 to −0.276**. The reason is
+one line away in `biomes.ts` — `sand to glass` fires at **median 1** under the same beam, so a
+boiled tile is *stone* within a day and returns through `the sea undercuts it` at median 26
+instead of 14, with further exits into lava and basalt. No product choice avoids that chain
+while the beam is overhead, so a fraction of every conversion leaks into permanent land
+whatever the geometry. **The median is the budget.**
+
+If someone wants the dramatic version, the lever is `sand to glass`, not this median. It
+modifies a validated beam rule and changes coastal glass formation everywhere, so it needs its
+own spec.
+
+## Part B acceptance criteria (as written)
 
 1. The beam's core visibly boils open ocean — demonstrated by an **ASCII render of the scar**,
    not only a statistic.

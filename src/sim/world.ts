@@ -72,51 +72,93 @@ const TERRAIN_CLASS: Uint8Array = (() => {
 export const DEFAULT_BAND_WIDTH = 8;
 
 // ---------------------------------------------------------------------------
-// The thermal filter — stored temperature, water coupling, distance falloff
+// The thermal filter — stored temperature, per-biome mass, neighbour exchange
 // ---------------------------------------------------------------------------
 
 /**
- * Relaxation rate per visit (= per day) for LAND.
+ * ★ THE TWO-CLASS `THERMAL_ALPHA_LAND` / `THERMAL_ALPHA_WATER` PAIR IS GONE.
  *
- * A tile's heat used to be a pure function of its neighbourhood, recomputed on every
- * visit, so "the temperature changes more slowly near water" had nothing to slow down.
- * `temperature` is that missing state and these are its time constants: land settles in
- * a handful of days, the sea takes a season.
+ * Relaxation rate is a property of the material, so it lives on the material:
+ * `BiomeDef.thermalAlpha` in `biomes.ts`. They are deleted rather than left at their old
+ * values because a constant that reads like a setting and controls nothing is the trap
+ * this file has been bitten by before. The land value was 0.5 and the water value 0.023;
+ * the water figure survives unchanged on all three true-water rows, which is the anchor
+ * the whole maritime lag was measured against. Decision `0026`.
  */
-export const THERMAL_ALPHA_LAND = 0.5;
-/**
- * Relaxation rate per visit for TRUE WATER (`water && !molten`).
- *
- * 0.023 is a ~43-day time constant, which against the 360-day year puts the sea's
- * seasonal peak ~37 days behind the land's at ~80% of its amplitude. That lag IS the
- * feature: the anomaly it creates is what the coupling below carries inland.
- */
-export const THERMAL_ALPHA_WATER = 0.023;
 
 /**
- * Coupling weight at the shoreline. `w(d) = WATER_COUPLING * exp(-(d-1)/WATER_COUPLING_FOLD)`,
- * zero beyond `WATER_REACH`, and 0 on water itself.
+ * Neighbour exchange rate per day — the κ of `T += kappa * (mean(T_neighbours) - T)`.
  *
- * ★ THIS NUMBER IS SPENT OUT OF INVARIANT 8's HEADROOM, and the trade is close to
- * linear — see the spec's table. It is not a free "more maritime climate" dial.
+ * ★ THIS IS A LAPLACIAN, AND THE FORM IS THE WHOLE POINT. Spec `2915cb06-2` prototyped
+ * neighbour coupling as a blend toward the mean ANOMALY, `target = H + m*ā`. In a
+ * spatially uniform region `ā = a`, so that collapses to `T += alpha*(1-m)*(H-T)`: the
+ * coupling weight multiplies the GLOBAL time constant by `1/(1-m)`, slowing down every
+ * tile on the map whether or not it sits on a gradient. Measured on `garden` at m=0.9:
+ * sea-ice annual max fell 36.3 -> 31.3 against `ICE_THAW` 28, 18.01% of sea-ice tiles
+ * never thawed in a year, and invariant 8 latched at frozensea 2.53% / forest 2.30%
+ * against a 2.00% limit.
+ *
+ * `mean(T_nb) - T` cannot do that. In a uniform field it is EXACTLY ZERO, so it cannot
+ * multiply any time constant; it acts only where a spatial gradient actually exists.
+ * That is a different operator, not a retune of the one that failed.
+ *
+ * ★ IT IS ALSO A MAX-PRINCIPLE UPDATE, WHICH IS THE REAL STABILITY ARGUMENT. The new
+ * value is a convex combination of `T` and the neighbour mean whenever `0 <= kappa <= 1`,
+ * so the field can never leave the range it started the day in — no oscillation, no
+ * divergence, no matter how sharp the coastline. The stricter `alpha + kappa <= 1` bound
+ * below is for the two terms applied TOGETHER, and it is checked per biome at module
+ * evaluation rather than asserted in a comment.
+ *
+ * ★ AND IT IS SHORT-RANGE BY CONSTRUCTION. Steady-state penetration into land is
+ * `~sqrt(kappa/alpha)` hexes — at 0.30 against a land alpha near 0.4 that is under one
+ * hex, and the measured shoreline reach is 3. It IS the requested "temperature relative
+ * to its direct neighbours", and it is also what replaced the maritime BFS below — see
+ * the note under it for what that cost.
  */
-export const WATER_COUPLING = 0.6;
-/** e-folding distance of the falloff, in hexes. */
-export const WATER_COUPLING_FOLD = 2;
-/** Hexes the water field is propagated. Beyond this a tile is inland, full stop. */
-export const WATER_REACH = 6;
+export const THERMAL_KAPPA = 0.30;
 
-/** `w(d)`, precomputed. Index 0 is water itself and is deliberately 0. */
-const COUPLING_WEIGHT = (() => {
-  const w = new Float64Array(WATER_REACH + 1);
-  for (let d = 1; d <= WATER_REACH; d++) {
-    w[d] = WATER_COUPLING * Math.exp(-(d - 1) / WATER_COUPLING_FOLD);
+/**
+ * The stability bound, checked once at module evaluation rather than asserted in prose.
+ *
+ * An explicit two-term scheme `T += alpha*(H-T) + kappa*(mean(T_nb)-T)` needs
+ * `alpha + kappa <= 1` or the tile overshoots its own target every step, and an
+ * overshoot that exceeds 1 in magnitude compounds — it oscillates, then diverges. There
+ * is no run in which that looks like a subtle bias; it looks like a world of NaN. This
+ * throws at import, so a biome table that breaks the bound cannot reach a simulation at
+ * all, let alone one whose numbers someone then records.
+ */
+(() => {
+  const bad = BIOMES.filter((d) => d.thermalAlpha + THERMAL_KAPPA > 1 || d.thermalAlpha <= 0);
+  if (bad.length > 0) {
+    throw new Error(
+      `Thermal scheme is unstable: ${bad.map((d) => `${d.key} alpha=${d.thermalAlpha}`).join(', ')} ` +
+        `against THERMAL_KAPPA=${THERMAL_KAPPA}. Every biome needs 0 < thermalAlpha <= ${1 - THERMAL_KAPPA}.`,
+    );
   }
-  return w;
 })();
 
-/** Sentinel in `waterDist` for "further from water than WATER_REACH". */
-const NO_WATER = 255;
+/**
+ * ★ THE PER-DAY MARITIME BFS IS GONE — `WATER_COUPLING` 0.6, `WATER_COUPLING_FOLD` 2,
+ * `WATER_REACH` 6, the `waterDist` / `waterAnomaly` fields and `refreshWaterField()`.
+ *
+ * It existed for exactly one reason: neighbour diffusion had been rejected, so distance
+ * falloff had to be manufactured. `THERMAL_KAPPA` produces falloff emergently, and the
+ * field was then measured to add NOTHING on top of it. Coastal seasonal amplitude at
+ * d=1 against the d=6..12 plateau, `garden` 160×96 seed 20260729, 1200d settle + 1 year:
+ *
+ *     BFS only (as shipped)   -33.45%   reach 4 hexes
+ *     Laplacian + BFS         -23.44%   reach 3 hexes
+ *     Laplacian, no BFS       -23.60%   reach 3 hexes     <- what runs now
+ *
+ * 0.16 pp between the last two is what sixty lines and a whole-map BFS were buying.
+ *
+ * ★ AND THE 10 pp BETWEEN THE FIRST TWO IS A REAL COST, PAID TO THE LAPLACIAN, NOT TO
+ * THE DELETION. It is not recoverable by turning kappa up: at kappa 0.40 the shoreline
+ * reads -22.62% and the reach is still 3 — WEAKER, not stronger. That is the structural
+ * claim the old field's comment made, confirmed from the other side: in a
+ * nearest-neighbour scheme reach and inertia are the same knob, so the coupling weight
+ * cannot buy reach. Decision `0026`.
+ */
 
 export interface WorldOptions {
   width: number;
@@ -164,14 +206,14 @@ export class World {
    */
   readonly temperature: Float32Array;
   /**
-   * The equilibrium heat `H` as of each tile's last visit.
+   * The equilibrium heat `H` as of each tile's last visit. Diagnostic only.
    *
-   * Stored rather than recomputed for one reason: the water field below needs a water
-   * tile's thermal ANOMALY (`T - H`), and recomputing `heatAt` for every water tile
-   * during the daily field refresh would be a second neighbour gather over the whole
-   * sea. Being one visit stale is correct as well as cheap — the field is resolved at
-   * the START of the day, so every land tile reads the same snapshot whatever order the
-   * sweep reaches them in.
+   * ★ IT NO LONGER HAS A READER IN THE STEPPING PATH, and that is deliberate rather than
+   * an oversight. It was stored so the maritime BFS could take a water tile's anomaly
+   * `T - H` without a second whole-sea neighbour gather; that field is gone. It is kept
+   * because `T - H` is still the one number that says whether a tile is ahead of or
+   * behind its own climate, which is what every thermal probe this spec needed had to
+   * reconstruct — 4 bytes/tile is a cheap price for a field that answers that directly.
    */
   readonly heatBase: Float32Array;
   /**
@@ -196,12 +238,21 @@ export class World {
   private readonly heatOffset: Float32Array;
   private readonly moistOffset: Float32Array;
 
-  /** Hexes to the nearest true water, or `NO_WATER`. Refreshed once a day. */
-  private readonly waterDist: Uint8Array;
-  /** Mean thermal anomaly of the water reaching this tile. Refreshed once a day. */
-  private readonly waterAnomaly: Float32Array;
-  /** BFS frontier for the water field. Every tile is enqueued at most once. */
-  private readonly fieldQueue: Int32Array;
+  /**
+   * The frozen field the daily neighbour-exchange pass READS. See `diffuseTemperature`.
+   *
+   * ★ IT EXISTS BECAUSE THE SWEEP IS BANDED, AND THIS IS THE "temperature chain" THE
+   * INTENT NAMES. `step()` evaluates tiles in bands that drift (decision `0006`), so a
+   * neighbour-reading update that read the live array would read partially updated
+   * values: heat would propagate arbitrarily far in the sweep direction inside a single
+   * day, and the artifact would MOVE as the bands move — not even a consistent bias.
+   * Copying into this buffer first is what makes the pass a function of yesterday alone.
+   *
+   * A copy rather than a pointer swap on purpose: `temperature` is a public `readonly`
+   * field that the viewer and the probes hold references to, and 138 KiB memcpy at
+   * 240×144 is far below the cost of the pass that follows it.
+   */
+  private readonly temperatureSnapshot: Float32Array;
 
   private readonly bandWidth: number;
 
@@ -257,13 +308,11 @@ export class World {
     this.biome = new Uint8Array(n);
     this.moisture = new Float32Array(n);
     this.temperature = new Float32Array(n);
+    this.temperatureSnapshot = new Float32Array(n);
     this.heatBase = new Float32Array(n);
     this.elevation = new Float32Array(n);
     this.heatOffset = new Float32Array(n);
     this.moistOffset = new Float32Array(n);
-    this.waterDist = new Uint8Array(n);
-    this.waterAnomaly = new Float32Array(n);
-    this.fieldQueue = new Int32Array(n);
 
     this.generate(opts.seaLevel ?? 0.44);
     this.seedTemperature();
@@ -296,7 +345,6 @@ export class World {
     // That is why `seedTemperature` above resolves `heatAt` with no cycle contribution
     // rather than by building a real `TileContext`.
     this.refreshCycles(0);
-    this.refreshWaterField();
   }
 
   /**
@@ -444,94 +492,54 @@ export class World {
   }
 
   /**
-   * Resolve the water-proximity field for one day: one capped multi-source BFS out
-   * from every true-water tile, carrying the sea's thermal ANOMALY inland.
+   * Exchange heat with the six neighbours, once a day, from a frozen snapshot.
    *
-   * ★ WHY A FIELD AND NOT NEIGHBOUR DIFFUSION. Diffusing the anomaly between adjacent
-   * tiles was prototyped and it LATCHES. In a spatially uniform region the diffusive
-   * form reduces to `T <- T + alpha*(1-m)*(H-T)`: the coupling weight multiplies the
-   * GLOBAL time constant by `1/(1-m)`, so a coupling strong enough to be felt three
-   * tiles inland slows down every tile on the map by the same factor. Measured on
-   * `garden` at m=0.9: ice annual max fell 36.3 -> 31.3 against ICE_THAW 28, 18.01% of
-   * sea-ice tiles never thawed in a year, and invariant 8 latched at frozensea 2.53% /
-   * forest 2.30% against a 2.00% limit. It is structural, not a tuning miss — in any
-   * nearest-neighbour scheme `reach ~ 0.5*sqrt(alpha*tau)`, so reach and inertia are
-   * the same knob. A field separates them: reach is the BFS cap, inertia is alpha.
+   *   T[i] <- T[i] + kappa * (mean(T_neighbours) - T[i])
    *
-   * ★ WHY DAILY AND NOT ONCE AT WORLDGEN. A static field is free and wrong. 4.0% of the
-   * tiles inside the maritime band changed their water distance over 260 days on
-   * `crucible`, and this epic exists to make coastlines move considerably more than
-   * that. Measured cost of the refresh at 240x144: 0.26 ms against a 19.67 ms simulated
-   * day, i.e. 1.3%; the per-tile 3-ring gather it replaces cost 5.4%.
+   * The other half of the filter — the pull toward the tile's own equilibrium,
+   * `alpha_i * (H_i - T[i])` — stays in `evaluateTile`, because `H` is only knowable
+   * there: it needs the tile's neighbour composition and today's `ambientHeat`, and
+   * resolving cycles per tile is exactly what `invariants.ts` §9 counts to measure the
+   * sweep. So the day is: exchange (here, from a snapshot), then relax (in the sweep).
    *
-   * ★ WHY IT IS DETERMINISTIC (R-004). A multi-source BFS is exactly the shape that
-   * violates determinism, so nothing here depends on discovery order. Ring 0 is built
-   * by an ascending index scan. A tile discovered at ring `d` then computes its own
-   * anomaly by gathering ITS neighbours that sit at ring `d-1`, in fixed direction
-   * order 0..5 — a pull, not a push. Ring `d-1` is complete and frozen by then, so the
-   * value written is a function of the biome array and the previous day's state alone,
-   * not of which source happened to reach the tile first. There is no Set, no Map, and
-   * no float sum whose order could vary.
+   * ★ SNAPSHOT, NOT IN-PLACE. See `temperatureSnapshot`. This is the requirement the
+   * intent states as "based on a snapshot of the whole map, this way we dont get like a
+   * temperature chain", and under a banded sweep it is a real defect class rather than a
+   * theoretical one.
+   *
+   * ★ WHY IT CANNOT LATCH THE WORLD, which is the thing the previous attempt did. The
+   * term is `mean(T_nb) - T`, so in a spatially uniform region it is EXACTLY ZERO and the
+   * tile relaxes at its own `alpha` unchanged. The rejected form blended toward the mean
+   * ANOMALY, which does not vanish in a uniform region and therefore multiplied every
+   * tile's time constant — see `THERMAL_KAPPA`.
+   *
+   * ★ DETERMINISM (R-004). Ascending index scan, six neighbours in fixed direction order,
+   * every read from the frozen buffer. Nothing here depends on evaluation order, which is
+   * the property a double-buffer bug destroys first.
    */
-  private refreshWaterField(): void {
-    const { grid, biome, temperature, heatBase, waterDist, waterAnomaly, fieldQueue } = this;
+  private diffuseTemperature(): void {
+    const { grid, temperature, temperatureSnapshot } = this;
     const n = grid.size;
-
-    waterDist.fill(NO_WATER);
-    let tail = 0;
+    temperatureSnapshot.set(temperature);
     for (let i = 0; i < n; i++) {
-      const def = BIOMES[biome[i]!]!;
-      // TRUE water only, the same test the hydrology uses: lava is `water` so that it
-      // flows, and a lava field must not export a maritime climate.
-      if (!def.water || def.molten) continue;
-      waterDist[i] = 0;
-      // The anomaly is the whole payload. `T - H` is a TRANSIENT: any sustained change
-      // in H moves T by the same amount in steady state and drives this to zero, so the
-      // DC gain from H to a rule's `heat` stays exactly 1 and no existing feedback's
-      // gain changes. The coupling transports lag, never level.
-      waterAnomaly[i] = temperature[i]! - heatBase[i]!;
-      fieldQueue[tail++] = i;
-    }
-
-    let ringStart = 0;
-    for (let d = 1; d <= WATER_REACH; d++) {
-      const ringEnd = tail;
-      if (ringStart === ringEnd) break;
-      for (let q = ringStart; q < ringEnd; q++) {
-        const u = fieldQueue[q]!;
-        for (let k = 0; k < 6; k++) {
-          const v = grid.neighbourAt(u, k);
-          if (waterDist[v] !== NO_WATER) continue;
-          waterDist[v] = d;
-          let sum = 0;
-          let cnt = 0;
-          for (let j = 0; j < 6; j++) {
-            const w = grid.neighbourAt(v, j);
-            if (waterDist[w] === d - 1) {
-              sum += waterAnomaly[w]!;
-              cnt++;
-            }
-          }
-          // cnt >= 1 by construction: `u` itself is at ring d-1.
-          waterAnomaly[v] = sum / cnt;
-          fieldQueue[tail++] = v;
-        }
-      }
-      ringStart = ringEnd;
+      const t = temperatureSnapshot[i]!;
+      let sum = 0;
+      for (let k = 0; k < 6; k++) sum += temperatureSnapshot[grid.neighbourAt(i, k)]!;
+      temperature[i] = t + THERMAL_KAPPA * (sum / 6 - t);
     }
   }
 
   /**
    * Everything that is resolved once per day, before the sweep touches a tile.
    *
-   * The order is not arbitrary: the water field reads `temperature` and `heatBase` as
-   * they stood at the end of yesterday, and the cycle states are what today's tiles
-   * will be evaluated against. Both are snapshots, which is what keeps the day's result
-   * independent of where the gaze happens to be when a question is asked.
+   * The order is not arbitrary: the exchange pass reads `temperature` as it stood at
+   * the end of yesterday, and the cycle states are what today's tiles will be evaluated
+   * against. Both are snapshots, which is what keeps the day's result independent of
+   * where the gaze happens to be when a question is asked.
    */
   private beginDay(day: number): void {
+    this.diffuseTemperature();
     this.refreshCycles(day);
-    this.refreshWaterField();
   }
 
   /**
@@ -688,10 +696,15 @@ export class World {
 
     // -- The thermal filter -------------------------------------------------
     //
+    //   (at the day boundary, from a snapshot — `diffuseTemperature`)
+    //   T     += kappa * (mean(T_neighbours) - T)  exchange with the six neighbours
+    //   (here, once per tile per day)
     //   H      = heatAt(...) + ambientHeat        today's equilibrium
-    //   target = H + w(d) * A                     A = anomaly of the water reaching us
-    //   T     += (target - T) * alpha             land 0.5, water 0.023
+    //   T     += (H - T) * alpha_i                ★ PER BIOME — `BiomeDef.thermalAlpha`
     //   heat   = T + effect.heat                  ★ ACUTE cycle heat BYPASSES the filter
+    //
+    // Two terms, not three. The maritime `w(d) * A` distance-falloff term is gone with
+    // the BFS field it read — the exchange line above is what carries the sea inland now.
     //
     // ★ THE LAST LINE IS NOT A SHORTCUT. `Focus` dwell under the blob beam is exactly
     // one day and carries heat 70 + focusHeat 45 = +115 against `melting`'s
@@ -702,17 +715,12 @@ export class World {
     // channels on `CycleEffect` are for.
     const equilibrium = this.heatAt(i, current, counts, openWaterNeighbours, iceNeighbours, effect.ambientHeat);
 
-    // Distance falloff. `waterDist` is 0 on water (which reads nothing — the field is
-    // one-directional, so there is no loop to close) and NO_WATER past the reach.
-    const dist = this.waterDist[i]!;
-    const target = dist === 0 || dist > WATER_REACH
-      ? equilibrium
-      : equilibrium + COUPLING_WEIGHT[dist]! * this.waterAnomaly[i]!;
-
-    // Water is the slow one, and it is what makes the anomaly exist at all.
-    const alpha = def.water && !def.molten ? THERMAL_ALPHA_WATER : THERMAL_ALPHA_LAND;
+    // Thermal mass is per biome now, not two classes. Water is still the slow one and is
+    // still what makes the anomaly exist at all; the land side is no longer one number,
+    // so sand and basalt no longer settle at the same rate. `BiomeDef.thermalAlpha`.
+    const alpha = def.thermalAlpha;
     const t = this.temperature[i]!;
-    const nextT = t + (target - t) * alpha;
+    const nextT = t + (equilibrium - t) * alpha;
     if (commit) {
       this.temperature[i] = nextT;
       this.heatBase[i] = equilibrium;

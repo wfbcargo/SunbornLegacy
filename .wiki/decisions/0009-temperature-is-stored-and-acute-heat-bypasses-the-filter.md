@@ -1,7 +1,12 @@
 # 0009 — Temperature is stored state, and acute heat bypasses the filter
 
 Date: 2026-07-29
-Status: accepted
+Status: accepted — **partially superseded by `0026`** (2026-07-30). The two headline claims
+below are unchanged and load-bearing: temperature is stored state, and **acute cycle heat
+bypasses the filter**. What `0026` replaced is the `alpha` half — the two-class
+`THERMAL_ALPHA_LAND` 0.5 / `THERMAL_ALPHA_WATER` 0.023 pair is now per-biome
+`BiomeDef.thermalAlpha`, and the `w(d)·A` maritime term in the filter equation below is gone
+with the BFS field that fed it. True water still relaxes at 0.023.
 Spec: `2915cb06-2_thermal-inertia`
 Decided by: `impl-thermal-inertia-7b3c05`
 

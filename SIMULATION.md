@@ -30,6 +30,16 @@ five commits, on the tree this file is committed with. Nothing is carried forwar
 earlier commit in the epic, however plausible it looked — see bug **#16**, which is the
 record of that exact mistake being made three times inside this epic alone.
 
+**Re-measured again 2026-07-30 for spec `a966588d`, Parts A and B** — Part A rewrote the
+climate filter and moved both golden hashes; Part B gave the beam's core a route through open
+water and moved `crucible`'s. The headline liveness tables,
+the escapability figures, the coastline membrane and gross-flux tables, and the golden hashes
+were all re-run on the post-Part-A tree and are current. **Two things here are deliberately
+NOT re-run and are labelled where they appear**: the re-key provenance table above, and the
+`ln 23` / `ln 22` denominator table below. Both are *historical comparisons about the 23rd
+biome* — re-measuring them on a later tree would not make them more true, it would destroy
+what they compare. Everything else describes the tree this file is committed with.
+
 The earlier re-key provenance table is kept, because it is evidence rather than a metric:
 transition rolls used to be keyed on a rule's **positional index** in the `RULES` array, so
 inserting or moving any rule handed every rule after it a different stream of dice. Rule
@@ -85,34 +95,39 @@ does, and what a person editing the end of a long command line means.
 
 | Metric | Result | Threshold |
 |---|---|---|
-| entropy (tail mean) | **0.772** | ≥ 0.65 |
-| largest biome | Deep Ocean, **17.7%** | ≤ 40% |
-| late churn | **3.65%** / sample | ≥ 0.15% |
-| biomes > 1% | **15** of 23 | ≥ 8 |
+| entropy (tail mean) | **0.769** | ≥ 0.65 |
+| largest biome | Deep Ocean, **17.9%** | ≤ 40% |
+| late churn | **3.42%** / sample | ≥ 0.15% |
+| biomes > 1% | **14** of 23 | ≥ 8 |
 
 Entropy opens at 0.521 on the day-0 worldgen and climbs; the tail minimum is 0.521.
 
 **Test 2 — is every start a niche?** ✓
-83 habitable regions (13 open water), **0 generic**, **0 thin**, **median 18 materials** each.
+82 habitable regions (14 open water), **0 generic**, **0 thin**, **median 21 materials** each.
 Averaged over 73 samples across the final third, not a single snapshot.
 
 **All five presets, same world, same command.**
 
 | preset | entropy (day 0 → tail) | largest biome | late churn | biomes > 1% | test 1 | test 2 |
 |---|---|---|---|---|---|---|
-| `crucible` | 0.521 → **0.772** | Deep Ocean 17.7% | **3.65%** | 15 | **PASS** | PASS — 83 regions, median 18, 0 generic / 0 thin |
-| `kiln` | 0.521 → **0.755** | Deep Ocean 17.2% | **3.25%** | 13 | **PASS** | PASS — 83 regions, median 18, 0 / 0 |
-| `anvil` | 0.521 → **0.728** | Barren 17.8% | **1.51%** | 11 | **PASS** | PASS — 81 regions, median 15, 0 / 0 |
-| `garden` | 0.521 → **0.723** | Deep Ocean 17.2% | **3.17%** | 13 | **PASS** | PASS — 83 regions, median 18, 0 / 0 |
-| `still` | 0.521 → **0.637** | Tundra 29.1% | **0.05%** | 9 | **FAIL** | **FAIL** — 81 regions, median 9, 15 generic / 19 thin |
+| `crucible` | 0.521 → **0.769** | Deep Ocean 17.9% | **3.42%** | 14 | **PASS** | PASS — 82 regions, median 21, 0 generic / 0 thin |
+| `kiln` | 0.521 → **0.754** | Deep Ocean 17.5% | **3.24%** | 13 | **PASS** | PASS — 83 regions, median 18, 0 / 0 |
+| `anvil` | 0.521 → **0.743** | Deep Ocean 17.1% | **1.18%** | 11 | **PASS** | PASS — 81 regions, median 12, 0 / 0 |
+| `garden` | 0.521 → **0.724** | Deep Ocean 17.5% | **3.20%** | 13 | **PASS** | PASS — 83 regions, median 18, 0 / 0 |
+| `still` | 0.521 → **0.636** | Tundra 29.1% | **0.05%** | 9 | **FAIL** | **FAIL** — 81 regions, median 9, 15 generic / 19 thin |
 
-**Performance.** `crucible` at 1500 days: 51,840,000 tile evaluations in 14.98 s =
-**3.46M tile-evals/sec** single-threaded. `still` over the same run: 7.68 s = **6.75M/sec**;
-the gap is the six cycles. A live world of this size needs 0.4 evals/sec, so ~8.7M× headroom.
+`anvil`'s largest biome moved from Barren 17.8% to Deep Ocean 17.2% under spec `a966588d`
+Part A, and its median materials fell 15 → 12. It is the preset most exposed to a climate
+change, being the one where the beam is the only disturbance.
+
+**Performance.** `crucible` at 1500 days: 51,840,000 tile evaluations in 15.50 s =
+**3.35M tile-evals/sec** single-threaded. `still` over the same run: 7.65 s = **6.77M/sec**;
+the gap is the six cycles. A live world of this size needs 0.4 evals/sec, so ~8.4M× headroom.
 These rates are hardware-dependent and are **not** comparable to the 7.5M/sec recorded before
-this epic — the per-tile work itself grew (a stored thermal filter and its daily water field,
-a weather layer, a river ring and an elevation gather). Treat the headroom, not the rate, as
-the finding.
+epic `2915cb06` — the per-tile work itself grew (a stored thermal filter, a weather layer, a
+river ring and an elevation gather). Spec `a966588d` Part A traded a per-day multi-source BFS
+for a per-day whole-map neighbour average, which is close to a wash. Treat the headroom, not
+the rate, as the finding.
 
 ---
 
@@ -122,23 +137,29 @@ The `still` preset is the control — same ruleset, no cycles at all. Both at 15
 
 | | `crucible` (six cycles) | `still` (no cycles) |
 |---|---|---|
-| entropy | **0.772** ✓ | 0.637 ✗ |
-| late churn | **3.65%** ✓ | **0.05%** ✗ |
-| biomes > 1% | 15 | 9 |
-| largest biome | Deep Ocean 17.7% | Tundra 29.1% |
-| habitable regions | 83, median 18 materials | 81, median 9 materials |
+| entropy | **0.769** ✓ | 0.636 ✗ |
+| late churn | **3.42%** ✓ | **0.05%** ✗ |
+| biomes > 1% | 14 | 9 |
+| largest biome | Deep Ocean 17.9% | Tundra 29.1% |
+| habitable regions | 82, median 21 materials | 81, median 9 materials |
 | generic / thin regions | 0 / 0 ✓ | 15 / 19 ✗ |
 | **verdict** | **alive** | **heat death** |
 
-Measured to four decimals over the same tail, `crucible` churns **3.6491%** against the
-control's **0.0507%** — **72×**, two orders of magnitude. A world with no disturbance
-converges to a static equilibrium and stops moving. The Sun God's reshaping is not flavour
-laid over a living world; it is the mechanism that makes it live.
+Over the same tail `crucible` churns **3.42%** against the control's **0.05%** — **~68×** at
+the precision `npm run sim` reports, two orders of magnitude either way. A world with no
+disturbance converges to a static equilibrium and stops moving. The Sun God's reshaping is not
+flavour laid over a living world; it is the mechanism that makes it live.
 
-`npm run sim:check` corroborates it independently and by a different route: **92.37%** of the
+`npm run sim:check` corroborates it independently and by a different route: **92.42%** of the
 `still` world holds tiles with no live out-rule at all across a full watched game-year,
-against **5.08%** for `crucible` — and all of `crucible`'s is Deep Ocean interior, which is
-expected and exempt. Nine-tenths of the control is terrain that can never change again.
+against **4.43%** for `crucible` — and effectively all of `crucible`'s is Deep Ocean interior
+(4.13% of 4.43%), which is expected and exempt. Nine-tenths of the control is terrain that can
+never change again.
+
+★ **The Deep Ocean exemption got smaller in spec `a966588d` Part B**, which is the first time
+it has. `the core boils it dry` gives open water a live out-rule under the beam's core, so
+`anvil` fell **14.51% → 8.61%**, `crucible` **5.87% → 4.43%** and `kiln` **7.30% → 6.66%**.
+Presets with no beam are unchanged by construction.
 
 **How dead "dead" looks depends on how long you watch.** The control's churn decays; it is
 not a constant. Measured at 240 × 144, mean churn per 5-day sample by 300-day window:
@@ -169,6 +190,12 @@ so entropy is the metric that *nearly lets a corpse through*. Here is what the s
 does now, with the denominator isolated — one set of tail compositions, evaluated two ways
 (240 × 144, 1500 d, seed 20260729):
 
+*(★ **This table is pinned to the pre-`a966588d` tree and is deliberately not re-measured.**
+Its whole content is a two-way evaluation of ONE set of tail compositions, so re-running it on
+a tree whose climate filter has since changed would compare two different worlds and answer a
+different question. The control's shipped entropy on the current tree is **0.636**, which is
+the same verdict at the precision that matters.)*
+
 | preset | `H / ln 23` (shipped) | `H / ln 22` (old denominator) | denominator effect |
 |---|---|---|---|
 | `still` | **0.6367** | **0.6459** | +0.0092 |
@@ -189,10 +216,13 @@ landed. Two facts, both from this repository:
 
 - **`still` contains no river tiles at all** — river does not appear in its composition at any
   share, on `still` or on `anvil`. The taxonomy grew; the control's map did not gain anything.
-- **`still`'s golden hash has been `10468117cccd7501` since spec 2** (`a26c8dd`), unchanged by
-  specs 3, 4 and 5. A no-cycle world's worldgen, hydrology and climate-gated rules have not
-  moved since thermal inertia landed, so the composition being divided is the same composition
-  before and after the biome count changed. The only thing that moved is the divisor.
+- **`still`'s golden hash was `10468117cccd7501` from spec 2** (`a26c8dd`) through spec
+  `0280c42b`, unchanged by specs 3, 4 and 5. A no-cycle world's worldgen, hydrology and
+  climate-gated rules did not move across the river epic, so the composition being divided is
+  the same composition before and after the biome count changed. The only thing that moved is
+  the divisor. *(It is `3bc4c35b1b99adc7` today: spec `a966588d` Part A rewrote the climate
+  filter, the first change since spec 2 able to move a world with no cycles. That is later than
+  the comparison above and does not affect it.)*
 
 So for the control, `H / ln 22 = 0.6459` **is** its pre-rivers score at this horizon, measured
 rather than remembered: the world is bit-identical and the arithmetic is exact. The margin went
@@ -244,11 +274,11 @@ drift, the post-transient rate, and that rate extrapolated to year 200:
 
 ```
   preset            y 0    y10    y20    y30    y40     drift    late pp/y   → y200
-  still           23.8%  22.2%  22.2%  22.2%  22.2%   ✓  -1.6pp     +0.000     22%
-  anvil           23.8%  24.3%  25.1%  25.5%  25.2%   ✓  +1.4pp     +0.004     26%
-  garden          23.8%  22.0%  21.8%  22.0%  22.0%   ✓  -1.8pp     +0.009     23%
-  kiln            23.8%  22.6%  22.8%  22.7%  22.0%   ✓  -1.8pp     -0.041     15%
-  crucible        23.8%  24.8%  25.5%  25.8%  26.3%   ✓  +2.5pp     +0.036     32%
+  still           23.8%  22.1%  22.1%  22.1%  22.1%   ✓  -1.7pp     +0.000     22%
+  anvil           23.8%  25.0%  25.0%  24.6%  24.2%   ✓  +0.4pp     -0.036     19%
+  garden          23.8%  21.8%  21.3%  21.5%  21.3%   ✓  -2.5pp     -0.001     21%
+  kiln            23.8%  21.8%  21.6%  21.9%  21.6%   ✓  -2.2pp     +0.001     22%
+  crucible        23.8%  23.7%  24.0%  24.8%  25.2%   ✓  +1.4pp     +0.062     35%
 
   ✓ the coastline is a two-way membrane on every cycle set
 ```
@@ -259,11 +289,21 @@ as a stock — the same 40 years, per rule, in percentage points of world per ga
 
 | preset | land→sea | sea→land | net | net as % of gross |
 |---|---|---|---|---|
-| `still` | 0.014 | 0.054 | −0.040 | 57.8% *(degenerate — a few dozen firings in 40 years)* |
-| `anvil` | 0.134 | 0.100 | **+0.034** | **14.7%** |
-| `garden` | 0.285 | 0.330 | **−0.045** | **7.3%** |
-| `kiln` | 0.460 | 0.505 | **−0.045** | **4.7%** |
-| `crucible` | 0.772 | 0.710 | **+0.061** | **4.1%** |
+| `still` | 0.009 | 0.052 | −0.043 | 70.0% *(degenerate — a few dozen firings in 40 years)* |
+| `anvil` | 1.063 | 1.052 | **+0.011** | **0.5%** |
+| `garden` | 0.302 | 0.365 | **−0.063** | **9.5%** |
+| `kiln` | 1.391 | 1.445 | **−0.054** | **1.9%** |
+| `crucible` | 1.791 | 1.755 | **+0.036** | **1.0%** |
+
+★ **The three beam presets' gross flux went up ~7× in spec `a966588d` Part B and their net
+went DOWN.** `anvil` was 0.158 / 0.082 for a net of 32% of gross; it is now 1.063 / 1.052 for
+**0.5%**. That is `the core boils it dry` and `sea takes it` running against each other over
+open ocean: the beam punches holes and the sea closes them, several times a game-year per
+hundred tiles of world, almost exactly cancelling. `garden` has no beam and does not move.
+
+**A near-perfect cancellation is not a restoring force**, and the paragraph below still
+applies unchanged — nothing here makes a drained sea refill. What it does mean is that the
+coastline is now doing an order of magnitude more work to stay in the same place.
 
 **On a live world the net is 4–15% of the gross.** The sea ends roughly where it starts not
 because anything pulls it back, but because two large opposed flows happen to nearly cancel.
@@ -278,22 +318,41 @@ the epic's three new coastline edges:
 
 | edge | spec | pp of world / game-year | direction |
 |---|---|---|---|
-| `shallows → desert` "the shallows bake dry" | 3 | 0.0226 | sea → land |
-| `shallows → basalt` "the flow builds new land" | 3 | 0.0191 | sea → land |
-| `river → shallows` "the river widens its mouth" | 5 | 0.0023 | land → sea |
+| `shallows → desert` "the shallows bake dry" | `2915cb06`-3 | 0.0226 | sea → land |
+| `shallows → basalt` "the flow builds new land" | `2915cb06`-3 | 0.0191 | sea → land |
+| `river → shallows` "the river widens its mouth" | `2915cb06`-5 | 0.0023 | land → sea |
+| `ocean`/`shallows` `→ desert` "the core boils it dry" | `a966588d` B | **0.018** | sea → land |
 
-All three sit inside the per-edge ceiling of 0.05 pp/y, and 0.044 pp/y in total against the
-0.125 pp/y aggregate ceiling (which is `sweep.ts`'s own fail threshold restated: 5 pp over 40
-game-years). Decisions `0012`, `0013`, `0014` and `0019` carry the reasoning.
+The epic's three sit inside the per-edge ceiling of 0.05 pp/y, and 0.044 pp/y in total against
+the 0.125 pp/y aggregate ceiling (which is `sweep.ts`'s own fail threshold restated: 5 pp over
+40 game-years). Decisions `0012`, `0013`, `0014` and `0019` carry the reasoning.
+
+⚠️ **The fourth row is measured differently and it is worse on one preset.** The three above
+were measured by rule-firing ledger on `crucible`; `the core boils it dry` is reported as its
+**contribution to the 60-game-year sea-share trend**, because the whole question about it was
+never gross firings — it fires constantly and the sea takes almost all of it back. On
+`crucible` that contribution is 0.018 pp/y. **On `anvil` it is 0.057 pp/y, which is over the
+0.05 per-edge ceiling**, and that is recorded rather than rounded: `anvil` is the preset where
+the beam is the only disturbance and the coastline has nothing else buffering it. The absolute
+trend stays inside the aggregate ceiling on all five presets. Decision `0027`.
+
+★ **The number that governs this edge is its MEDIAN, not its return path**, which is the
+opposite of what the spec was written expecting. Full tradeoff table and the reason — a boiled
+tile vitrifies to stone in a day via `sand to glass`, median 1 — in decision `0027`.
 
 ### ⚠️ A slow drain and a slow flood both pass the test — read the "late pp/y" column
-`kiln` drifts −1.8 pp over 40 years, comfortably inside ±5, and its **post-transient rate is
-−0.041 pp/y**, projecting to **15% sea at year 200**. `crucible` drifts +2.5 pp and projects
-to **32%**. Neither is a defect this epic introduced — both became visible only because spec 3
-added the rate column — but both say the ±5 pp / 40-year test **cannot distinguish "converged"
-from "draining forever"** on the timescale a long-lived server actually runs. Making the rate a
-gate would fail `kiln` today, which is a tuning decision and is deliberately not taken here.
-See "Open, escalated" below.
+`crucible` drifts +2.9 pp over 40 years, comfortably inside ±5, and its **post-transient rate
+is +0.034 pp/y**, projecting to **32% sea at year 200**. The ±5 pp / 40-year test **cannot
+distinguish "converged" from "flooding forever"** on the timescale a long-lived server actually
+runs, and this is the case that shows it.
+
+⚠️ **The `kiln` example this section used to lead with is gone, and its disappearance is not
+reassurance.** `kiln` read −0.041 pp/y before spec `a966588d` Part A and reads **+0.008** after
+it, so the projection moved from 15% sea at year 200 to 23%. Nothing addressed the drain: the
+thermal scheme changed, and a rate measured off two decade samples moved sign with it. **That is
+the finding.** The rate column is sensitive enough to flip on a change that was not aimed at the
+coastline at all, so it diagnoses rather than gates — making it a gate would have failed `kiln`
+on one tree and passed it on the next. Deliberately not taken. See "Open, escalated" below.
 
 ---
 
@@ -636,6 +695,22 @@ exists to detect. Fixed by making maritime reach a **per-day BFS proximity field
 explicit distance falloff**, computed independently of the tile's thermal inertia, so the two
 became separate parameters. Decisions `0009`, `0010`, `0011`.
 
+⚠️ **Read the form, not the word "diffusion" — spec `a966588d` narrowed this and the
+distinction is the whole lesson.** What latched was `target = H + m·ā` (`ā` = mean neighbour
+*anomaly*), which does **not** vanish in a spatially uniform region and therefore multiplies
+every tile's time constant whether or not it sits on a gradient. A true Laplacian,
+`T += κ·(mean(T_nb) − T)`, is **exactly zero** in a uniform region and cannot do that: measured
+on `garden`, the polar cap's mean annual max heat *rose* 32.2 → 33.2 against `ICE_THAW` 28 with
+**0.00% of sea-ice tiles failing to thaw**, where the rejected form drove it 36.3 → 31.3 and
+stranded 18.01%. The BFS field has since been deleted in favour of the Laplacian — but **not
+because the Laplacian matched its reach**, which it does not (3 hexes and −23.60% at the
+shoreline, against the field's 4 hexes and −33.45%). It was deleted because, with the Laplacian
+in place, the field was measured to add **0.16 pp**. Decision `0026`.
+
+**The knob still does not exist.** `κ` cannot buy reach back: at κ=0.40 the shoreline reads
+−22.62%, *weaker* than at 0.30, with the reach still 3. Reach and inertia remain the same knob
+in any nearest-neighbour scheme — which is what this bug said, and it is still true.
+
 **12. ★ A storm classified on wetness latches to 100% rain share.**
 *Looked reasonable:* a storm over wet ground should stay wet, a storm over dry ground should dry
 out — that is what weather does. *What it actually did:* rain raises moisture, moisture
@@ -750,8 +825,8 @@ All passing.
   frozensea  → desert      d=2   frozensea → shallows → desert
   ```
 - **No biome family latches on a live world.** Share of the world with no live out-rule over a
-  watched game-year: `crucible` **5.08%** (all Deep Ocean interior), `kiln` **7.55%**, `garden`
-  **8.40%**, `anvil` **13.54%** (ocean 13.51%), `still` **92.37%** (control, exempt by
+  watched game-year: `crucible` **4.43%** (4.13% Deep Ocean interior), `kiln` **6.66%**, `garden`
+  **8.18%**, `anvil` **8.61%** (all ocean), `still` **92.42%** (control, exempt by
   construction).
 - **The sweep covers every column exactly once a day, at every width** — 1.000
   evaluations/column/day at all ten width × band combinations, measured through a zero-effect
@@ -792,13 +867,19 @@ So two worlds are pinned by hash. 160 × 96, seed 20260729, 500 days:
 
 | case | preset | hash |
 |---|---|---|
-| `still` | no cycles | `10468117cccd7501` |
-| `crucible` | all six cycles | `599d7815137a0a4f` |
+| `still` | no cycles | `3bc4c35b1b99adc7` |
+| `crucible` | all six cycles | `406cbd9ca84e3e3f` |
 
 Both verified deterministic across two independent builds in the same run, which is R-004
-tested rather than asserted. **Neither moved during this documentation pass**, which is the
-point: a re-baseline that changes no behaviour must not change a hash, and a hash that moved
-here would have meant the pass had done something it was not allowed to do.
+tested rather than asserted. **Both moved in spec `a966588d` Part A**, deliberately: the
+thermal scheme changed, so the world changed, and the hashes were re-baselined with `--update`
+in the same commit as this file. `still` moving is the informative half — it has no cycles, so
+nothing but worldgen, hydrology or the climate filter itself can have moved it.
+
+⚠️ **`crucible` was carrying a stale hash before this.** This table and `README.md` both read
+`599d7815137a0a4f` while `golden.ts` had held `0a1c093d0850b2ad` since spec `0280c42b` — that
+spec re-baselined the code and did not update the docs, which is exactly the half-done
+re-baseline R-010 forbids. Corrected here.
 
 Two cases rather than one so a failure **localises**: `still` exercises worldgen, the hydrology
 and the climate-gated rules only. If both drift, suspect worldgen or hydrology; if only
@@ -880,11 +961,16 @@ green creeping back across the scar.
 hot equator, one cold band, continuous across the seam. The desert belt and tundra band emerge
 from hydrology rather than being authored.
 
-**The sea reaches inland.** Temperature is stored per tile and relaxes towards a target, so a
-coastline lags the season it is in; a per-day BFS proximity field with distance falloff carries
-the sea's moderating influence inland; and acute heat — a purge, a vent, a quake — bypasses the
-filter entirely, because a one-day +115 against a melt gate of 120 does not survive being
-low-passed. Decisions `0009`–`0011`.
+**The sea reaches inland.** Temperature is stored per tile and relaxes towards its own
+equilibrium at a **per-biome** rate (`BiomeDef.thermalAlpha`: deep water 0.023, dry sand 0.60,
+stone 0.25–0.30), so a coastline lags the season it is in; a **snapshot-based neighbour
+exchange** `T += κ·(mean(T_nb) − T)`, κ = 0.30, resolved once a day at the day boundary,
+carries the sea's moderating influence inland — **3 hexes, −23.60% seasonal amplitude at the
+shoreline**; and acute heat — a purge, a vent, a quake — bypasses the filter entirely, because a
+one-day +115 against a melt gate of 120 does not survive being low-passed. The double buffer is
+load-bearing rather than tidy: the sweep evaluates in drifting bands, so an in-place
+neighbour-reading update would propagate heat along the sweep direction and the artifact would
+move with the bands. Decisions `0009`–`0011`, `0026`.
 
 **Weather is legibility, not disturbance.** Storms travel their own sinusoidal tracks, morph
 against the ground they cross and die on it — 24.8% of storm-days end in a death on `crucible`'s
