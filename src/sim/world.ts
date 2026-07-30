@@ -238,6 +238,30 @@ export class World {
    * longer fuse and no cap. Nothing in the stepping path writes here. Decision `0018`.
    */
   readonly elevation: Float32Array;
+  /**
+   * Where the crust is live, 0..1. Static worldgen geography — WRITTEN ONCE AND NEVER
+   * AGAIN, the same discipline as `elevation` and for a related but distinct reason.
+   *
+   * ★ WHAT IT IS FOR. Permanent mineral geography. The economy separates harvest flows
+   * from permanent geology (`ARCHITECTURE.md#7.1`), and regional materials are the supply
+   * curve the trade game rests on. Mineral country that is re-rolled every time the beam
+   * passes is not geology, so the field that decides it must be one the simulation cannot
+   * touch. Independent of `elevation` on purpose: height and crustal activity are separate
+   * facts, so a world may hold a high dead plateau and a low active belt.
+   *
+   * ★ WHY IT IS EXPOSED RAW WHEN ELEVATION IS NOT — read this before adding a third static
+   * channel, because the elevation precedent points the other way. Decision `0018` hides
+   * elevation behind derived fields because elevation feeds `heatOffset`, so a rule
+   * thresholding it sits one step from a self-reinforcing loop. `tectonic` feeds nothing.
+   * Nothing in the stepping path writes here and no transition, cycle or feedback can move
+   * it, so a raw threshold on it satisfies decision `0021` exactly: a gate may read what
+   * the feature cannot create. That is a property of THIS field, not of static fields in
+   * general.
+   *
+   * Read by no rule today (spec `d53ccbb6-2` ships the channel unread, so the golden
+   * hashes cannot move). 4 bytes/tile, as `elevation`.
+   */
+  readonly tectonic: Float32Array;
   /** Static per-tile climate offsets from worldgen (elevation, prevailing damp). */
   private readonly heatOffset: Float32Array;
   private readonly moistOffset: Float32Array;
@@ -315,6 +339,7 @@ export class World {
     this.temperatureSnapshot = new Float32Array(n);
     this.heatBase = new Float32Array(n);
     this.elevation = new Float32Array(n);
+    this.tectonic = new Float32Array(n);
     this.heatOffset = new Float32Array(n);
     this.moistOffset = new Float32Array(n);
 
@@ -781,6 +806,7 @@ export class World {
       riverRing,
       upstreamRiverNeighbours,
       downhillNeighbours,
+      tectonic: this.tectonic[i]!,
       flags: effect.flags,
       underBeam: (effect.flags & CycleFlag.Beam) !== 0,
     };
@@ -933,6 +959,7 @@ export class World {
 
         // The ONE write to `elevation`, for the life of the world. See the field.
         this.elevation[i] = t.elevation;
+        this.tectonic[i] = t.tectonic;
         this.heatOffset[i] = t.heatOffset;
         this.moistOffset[i] = t.moistOffset;
         this.biome[i] = t.biome;

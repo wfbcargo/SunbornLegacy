@@ -230,6 +230,22 @@ export interface TileContext {
    */
   readonly downhillNeighbours: number;
   /**
+   * How live this tile's crust is, 0..1. Static worldgen geography — see `World.tectonic`.
+   *
+   * ★ THE ONLY RAW STATIC NUMBER IN THIS INTERFACE, AND THE EXCEPTION IS EARNED. Elevation
+   * is deliberately NOT here (decision `0018`): it feeds `heatOffset`, so a rule
+   * thresholding it sits one step from a self-reinforcing loop, and it reaches rules only
+   * through `upstreamRiverNeighbours` / `downhillNeighbours`. `tectonic` feeds nothing and
+   * nothing in the stepping path writes it, so a gate on it reads something the feature
+   * cannot create — decision `0021`'s condition, met exactly.
+   *
+   * ⚠️ No rule reads this yet. Whether one should is a held product decision: every route
+   * into Rock is currently `CycleFlag.Quake`-gated, which is what makes `README.md`
+   * finding #4 true, and a `tectonic`-gated route would give a beam-only world mountains
+   * it cannot currently have. See `specs/d53ccbb6-2_tectonic-channel.md`.
+   */
+  readonly tectonic: number;
+  /**
    * OR of every CycleFlag raised on this tile today — see cycles.ts.
    *
    * This is how the disturbance engine reaches the ruleset. Rules should test flags,

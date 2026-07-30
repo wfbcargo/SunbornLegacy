@@ -38,6 +38,7 @@ export interface WorldgenConfig {
   readonly elevSeed: number;
   readonly moistSeed: number;
   readonly roughSeed: number;
+  readonly tectSeed: number;
 }
 
 /** One tile's day-0 state. Mutable so a caller can reuse a single scratch object. */
@@ -47,12 +48,21 @@ export interface WorldgenTile {
   moistOffset: number;
   biome: Biome;
   moisture: number;
+  tectonic: number;
 }
 
 export function makeWorldgenTile(): WorldgenTile {
-  return { elevation: 0, heatOffset: 0, moistOffset: 0, biome: Biome.Ocean, moisture: 0 };
+  return {
+    elevation: 0, heatOffset: 0, moistOffset: 0, biome: Biome.Ocean, moisture: 0, tectonic: 0,
+  };
 }
 
+/**
+ * ★ `tectSeed` IS DRAWN LAST, AND THAT IS NOT COSMETIC. The first three draws must come
+ * off this stream in the order they always have — appending a fourth leaves them
+ * bit-identical, inserting one anywhere earlier shifts every seed after it and moves
+ * every golden hash.
+ */
 export function worldgenConfig(
   seed: number, width: number, height: number, seaLevel: number,
 ): WorldgenConfig {
@@ -60,8 +70,41 @@ export function worldgenConfig(
   const elevSeed = (rand() * 1e9) | 0;
   const moistSeed = (rand() * 1e9) | 0;
   const roughSeed = (rand() * 1e9) | 0;
-  return { width, height, seaLevel, elevSeed, moistSeed, roughSeed };
+  const tectSeed = (rand() * 1e9) | 0;
+  return { width, height, seaLevel, elevSeed, moistSeed, roughSeed, tectSeed };
 }
+
+/**
+ * How many octaves the tectonic field gets. Measured, not chosen — and the first guess
+ * was wrong in the opposite direction to the obvious worry.
+ *
+ * The worry was salt-and-pepper: a high-octave field thresholding into speckles, so that
+ * "this range has always been iron country" would be false at the scale a caravan
+ * crosses. So this started at 2 octaves. Measured, 240×144 seed 20260729, counting
+ * connected components of the above-threshold set on the hex torus:
+ *
+ *     oct  t=0.60                     t=0.70
+ *      2   35.77%, 1 component        17.01%, 1 component
+ *      3   31.69%, 2                  11.15%, 2  (3742, 112)
+ *      4   30.70%, 3                   8.52%, 6  (1909, 877, 89)
+ *      5   29.90%, 5                   7.10%, 9  (1537, 807, 55)
+ *
+ * The failure at 2 octaves is the mirror image of the one feared: not speckle but a
+ * SUPERCONTINENT. A third of the world above threshold in ONE component means every
+ * mineral province touches every other, and regional materials have no geography to be
+ * regional about. Four octaves is where the field breaks into a large craton plus
+ * genuinely separate smaller provinces.
+ *
+ * ★ ONE COMPONENT ALWAYS DOMINATES, AT EVERY OCTAVE COUNT, and that is a property of
+ * thresholding fractal noise rather than a tuning failure — level sets of smooth noise
+ * percolate. It also happens to be what continental crust looks like: a few big cratons
+ * and a scatter of smaller ones. Anyone wanting many similar-sized provinces needs a
+ * different construction (Worley cells, not fbm), not a different octave count.
+ *
+ * The threshold itself is deliberately NOT fixed here — it belongs to whichever rule
+ * eventually reads the field, and today none does.
+ */
+const TECTONIC_OCTAVES = 4;
 
 /**
  * A torus has no poles, so latitude is a smooth periodic band instead: one hot
@@ -116,6 +159,10 @@ export function worldgenAt(
   out.moistOffset = moistOffset;
   out.biome = b;
   out.moisture = source > 0 ? source : Math.max(0, Math.min(100, moist));
+  // Independent of elevation on purpose: height and crustal activity are different facts
+  // about a place, so a world may hold a high dead plateau and a low active belt. Read by
+  // nothing today — see the field on `World` and `TileContext.tectonic`.
+  out.tectonic = fbm(col, row, cfg.tectSeed, TECTONIC_OCTAVES, width, height);
   return out;
 }
 
