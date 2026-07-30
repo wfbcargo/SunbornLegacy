@@ -55,6 +55,7 @@ import {
   buildAdjacency, flagMaskForKinds, reachableCore, satisfiable, tarjan,
 } from './reachability.ts';
 import { DEFAULT_BAND_WIDTH, World } from './world.ts';
+import { makeWorldgenTile, worldgenAt, worldgenConfig } from './worldgen.ts';
 
 const COLOUR = process.env.NO_COLOR === undefined && process.env.TERM !== 'dumb';
 const bold = (s: string) => (COLOUR ? `\x1b[1m${s}\x1b[0m` : s);
@@ -667,6 +668,101 @@ section('sweep coverage');
       '\n  A zero-effect observer cycle counts real `affect` calls per column, so this\n' +
         '  measures the sweep the simulator actually runs. Before the fix, 244/250/100\n' +
         '  read 1.016/1.024/1.040 here — see decision `0006`.',
+    ),
+  );
+}
+
+// ===========================================================================
+
+section('worldgen purity');
+
+/**
+ * A tile must generate the same in ISOLATION, in ANY ORDER, as it does in a whole-grid
+ * sweep. That is the property lazy materialization (`ARCHITECTURE.md#4.3`) actually
+ * depends on: a worker materializes one region's 64 tiles without generating — or ever
+ * having generated — the 51,199 regions around it.
+ *
+ * ⚠️ THIS DELIBERATELY DOES NOT COMPARE `worldgenAt` AGAINST `World.generate()`.
+ * `World.generate()` is now a loop over `worldgenAt`, so that comparison is a function
+ * against itself and cannot fail — it would be a green tick that proves nothing. What
+ * guards the extraction's *fidelity* is `npm run sim:golden`, which runs the whole `World`
+ * path and is unchanged from before the extraction. What guards its *purity* is this.
+ *
+ * Two world sizes, because order-dependence can be size-specific — a stride that happens
+ * to be benign on one grid is not on another. Note what this does NOT catch: a bug that
+ * ignored `width`/`height` for a hardcoded constant would corrupt the reference and the
+ * probe identically and pass here. `sim:golden` is what catches that, because its worlds
+ * are 160×96 and any hardcoded dimension moves the hash.
+ */
+{
+  const cases: Array<{ w: number; h: number; seed: number }> = [
+    { w: 240, h: 144, seed: 20260729 },
+    { w: 96, h: 64, seed: 7 },
+  ];
+
+  for (const { w, h, seed } of cases) {
+    // Reference: one config, one scratch object, straight raster order — the exact
+    // access pattern `World.generate()` uses.
+    const refCfg = worldgenConfig(seed, w, h, 0.44);
+    const scratch = makeWorldgenTile();
+    const refBiome = new Uint8Array(w * h);
+    const refElev = new Float64Array(w * h);
+    const refMoist = new Float64Array(w * h);
+    for (let row = 0; row < h; row++) {
+      for (let col = 0; col < w; col++) {
+        const i = row * w + col;
+        worldgenAt(refCfg, col, row, scratch);
+        refBiome[i] = scratch.biome;
+        refElev[i] = scratch.elevation;
+        refMoist[i] = scratch.moisture;
+      }
+    }
+
+    // Probe: a scattered, non-monotone walk, each tile generated from a FRESH config and
+    // a FRESH output object. Fresh config catches state hiding in `worldgenConfig`'s
+    // mulberry32 stream; scattered order catches any dependence on the previous call;
+    // fresh output catches a field left unwritten and inherited from the last tile.
+    let mismatches = 0;
+    let firstMismatch = '';
+    let probed = 0;
+    const stride = 7919; // coprime with any grid size here, so the walk covers the world
+    for (let k = 0; k < w * h; k++) {
+      const i = (k * stride) % (w * h);
+      const col = i % w;
+      const row = (i - col) / w;
+      const t = worldgenAt(worldgenConfig(seed, w, h, 0.44), col, row);
+      probed++;
+      const deltas: Array<[string, number, number]> = [
+        ['biome', t.biome, refBiome[i]!],
+        ['elevation', t.elevation, refElev[i]!],
+        ['moisture', t.moisture, refMoist[i]!],
+      ];
+      for (const [field, got, want] of deltas) {
+        if (got === want) continue;
+        mismatches++;
+        if (firstMismatch === '') {
+          firstMismatch = `${field} at (${col},${row}): isolated ${got} vs swept ${want}`;
+        }
+      }
+    }
+
+    const label = `${w}×${h} seed ${seed}`;
+    if (mismatches === 0) {
+      console.log(
+        `  ${green('✓')} ${label.padEnd(22)} ` +
+          dim(`${probed.toLocaleString()} tiles identical generated alone and out of order`),
+      );
+    } else {
+      fail(`worldgen purity ${label}: ${mismatches} mismatch(es) — ${firstMismatch}`);
+      console.log(`  ${red('✗')} ${label.padEnd(22)} ${mismatches} mismatch(es); first: ${firstMismatch}`);
+    }
+  }
+  console.log(
+    dim(
+      '\n  Materialization generates one region without its neighbours. If a tile depends on\n' +
+        '  the order it was generated in, a materialized region stops being the same ground\n' +
+        '  as the world it was cut from — and no golden hash would notice, because the golden\n' +
+        '  path always sweeps the whole grid in raster order.',
     ),
   );
 }

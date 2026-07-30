@@ -23,6 +23,13 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 A cycle may READ the world: dayState(day, view) + readsWorld, and heat
 │                 has two channels — acute `heat` and filtered `ambientHeat` (decision 0007).
 │                 SolarBeam is shape: 'band' | 'blob', defaulting to a swept disc (0008)
+├── worldgen.ts   worldgenAt(cfg, col, row) — day-0 tile state as a PURE function of
+│                 position, no whole-grid allocation. Owns the fbm/periodicNoise field,
+│                 seedBiome and latitudeHeat. `World.generate()` is a loop over it.
+│                 ⚠️ Takes the world's WIDTH AND HEIGHT: the noise is normalised by grid
+│                 size, so `worldgenAt(seed, col, row)` as specified in
+│                 ARCHITECTURE.md#13 Phase 1 cannot reproduce a world. That is also what
+│                 lets the coarse tier sample the same continuous field at 1/8 resolution
 ├── world.ts      World — owns biome/moisture/temperature/elevation arrays, band sweep,
 │                 the per-day maritime proximity field, stepDay()
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)

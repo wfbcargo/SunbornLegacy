@@ -16,11 +16,15 @@
  */
 
 import { HexTorus } from './hex.ts';
-import { medianToProbability, mulberry32, rollAt } from './rng.ts';
+import { medianToProbability, rollAt } from './rng.ts';
 import {
-  ARID, BIOME_COUNT, Biome, BIOMES, COLD, DRY, GLACIAL, MOIST, RULES_BY_BIOME,
-  SCORCHING, WARM, WET, type TileContext,
+  BIOME_COUNT, Biome, BIOMES, RULES_BY_BIOME, type TileContext,
 } from './biomes.ts';
+// The climate thresholds and the noise field moved out with `seedBiome` — worldgen is a
+// pure function of position now, and `World.generate` is a loop over it (spec `d53ccbb6-1`).
+import {
+  latitudeHeat, makeWorldgenTile, worldgenAt, worldgenConfig,
+} from './worldgen.ts';
 import {
   CycleEffect, CycleFlag, SolarBeam, TerrainClass, makeCycle,
   type BeamSighting, type CycleForecast, type CycleSpec, type WorldCycle, type WorldView,
@@ -400,7 +404,7 @@ export class World {
    * equator at row 0 and one cold band at row H/2, continuous across the seam.
    */
   private latitudeHeat(row: number): number {
-    return 26 * Math.cos((2 * Math.PI * row) / this.grid.height);
+    return latitudeHeat(row, this.grid.height);
   }
 
   /**
@@ -912,125 +916,29 @@ export class World {
   // Worldgen
   // -------------------------------------------------------------------------
 
+  /**
+   * A loop over `worldgenAt`, and nothing more. The maths lives in `worldgen.ts` so a
+   * caller can generate one tile — or one region's 64 — without building a world
+   * (`ARCHITECTURE.md#4.3`). One scratch object for the whole grid, not one per tile.
+   */
   private generate(seaLevel: number): void {
     const { grid } = this;
-    const rand = mulberry32(this.seed ^ 0x5eed);
-    const elevSeed = (rand() * 1e9) | 0;
-    const moistSeed = (rand() * 1e9) | 0;
-    const roughSeed = (rand() * 1e9) | 0;
+    const cfg = worldgenConfig(this.seed, grid.width, grid.height, seaLevel);
+    const t = makeWorldgenTile();
 
     for (let row = 0; row < grid.height; row++) {
       for (let col = 0; col < grid.width; col++) {
         const i = row * grid.width + col;
-
-        const elev = this.fbm(col, row, elevSeed, 3);
-        const damp = this.fbm(col, row, moistSeed, 4);
-        const rough = this.fbm(col, row, roughSeed, 5);
+        worldgenAt(cfg, col, row, t);
 
         // The ONE write to `elevation`, for the life of the world. See the field.
-        this.elevation[i] = elev;
-        // Elevation cools, and adds regional variety beyond pure latitude. Note this is
-        // lossy in both directions — clamped below 0.5 and mixed with `rough` above it —
-        // which is exactly why the raw field above is kept rather than inverted from here.
-        this.heatOffset[i] = -34 * Math.max(0, elev - 0.5) + (rough - 0.5) * 10;
-        this.moistOffset[i] = (damp - 0.5) * 26;
-
-        const heat = 50 + this.latitudeHeat(row) + this.heatOffset[i]!;
-        const moist = 45 + this.moistOffset[i]! + (damp - 0.5) * 30;
-
-        const b = this.seedBiome(elev, heat, moist, seaLevel);
-        this.biome[i] = b;
-        // Seed from the SAME per-biome source the simulation uses, so day 0 is already
-        // a consistent hydrological state. Reading `water ? 100` here while
-        // `evaluateTile` reads `moistureSource` diverges the instant worldgen emits a
-        // frozen sea (source 55) or a lava field (source 0), and the divergence shows
-        // up as a one-day pulse of phantom moisture that is very hard to attribute.
-        const source = BIOMES[b]!.moistureSource;
-        this.moisture[i] = source > 0 ? source : Math.max(0, Math.min(100, moist));
+        this.elevation[i] = t.elevation;
+        this.heatOffset[i] = t.heatOffset;
+        this.moistOffset[i] = t.moistOffset;
+        this.biome[i] = t.biome;
+        this.moisture[i] = t.moisture;
       }
     }
-  }
-
-  /**
-   * Day-0 biome for a tile.
-   *
-   * Every family must be represented at worldgen. A world that starts with no
-   * mountains, no wetlands and no rainforest does eventually find them — but through
-   * the slowest edges in the graph, so it takes game-centuries and the first
-   * measurement window reports a world that is missing a third of its taxonomy. The
-   * arms below are climate-plausible seeds, not a shortcut around the ruleset: every
-   * one of them is somewhere the corresponding transition rule would have put it.
-   */
-  private seedBiome(elev: number, heat: number, moist: number, seaLevel: number): Biome {
-    if (elev < seaLevel - 0.04) return heat < GLACIAL ? Biome.FrozenSea : Biome.Ocean;
-    if (elev < seaLevel) return heat < GLACIAL ? Biome.FrozenSea : Biome.Shallows;
-
-    // Highland: peaks, then bare stone below them.
-    if (elev > 0.82) return Biome.Mountain;
-    if (elev > 0.76) return heat < GLACIAL && moist > 45 ? Biome.Glacier : Biome.Rock;
-
-    if (heat < GLACIAL && moist > 45) return Biome.Glacier;
-    if (heat < COLD - 2) return moist < DRY && heat < GLACIAL + 6 ? Biome.Rock : Biome.Tundra;
-
-    if (heat > SCORCHING && moist < ARID) return Biome.Desert;
-    if (heat > SCORCHING && moist < DRY) return Biome.Savanna;
-
-    if (moist > WET) {
-      if (heat > 58 && heat < 82) return Biome.Rainforest;
-      if (heat < 58) return Biome.Marsh;
-    }
-    if (moist > MOIST && heat >= 62) return Biome.Swamp;
-    if (moist > MOIST && heat < WARM) return Biome.Forest;
-    if (moist > DRY) return heat > WARM ? Biome.Savanna : Biome.Grassland;
-    if (moist > ARID) return heat > WARM ? Biome.Savanna : Biome.Grassland;
-    if (heat < COLD) return Biome.Tundra;
-    if (heat > WARM) return Biome.Desert;
-    return Biome.Barren;
-  }
-
-  /** Fractal value noise that tiles on the torus, so there is no seam. */
-  private fbm(col: number, row: number, seed: number, octaves: number): number {
-    let total = 0;
-    let amplitude = 1;
-    let norm = 0;
-    let periodX = 4;
-    let periodY = 3;
-
-    for (let o = 0; o < octaves; o++) {
-      total += amplitude * this.periodicNoise(col, row, periodX, periodY, seed + o * 7919);
-      norm += amplitude;
-      amplitude *= 0.5;
-      periodX *= 2;
-      periodY *= 2;
-    }
-    return total / norm;
-  }
-
-  private periodicNoise(col: number, row: number, periodX: number, periodY: number, seed: number): number {
-    const gx = (col / this.grid.width) * periodX;
-    const gy = (row / this.grid.height) * periodY;
-    const x0 = Math.floor(gx);
-    const y0 = Math.floor(gy);
-    const fx = gx - x0;
-    const fy = gy - y0;
-
-    const sx = fx * fx * (3 - 2 * fx);
-    const sy = fy * fy * (3 - 2 * fy);
-
-    const wrap = (v: number, p: number) => ((v % p) + p) % p;
-    const x1 = wrap(x0 + 1, periodX);
-    const y1 = wrap(y0 + 1, periodY);
-    const xw = wrap(x0, periodX);
-    const yw = wrap(y0, periodY);
-
-    const v00 = rollAt(seed, xw, yw);
-    const v10 = rollAt(seed, x1, yw);
-    const v01 = rollAt(seed, xw, y1);
-    const v11 = rollAt(seed, x1, y1);
-
-    const top = v00 + (v10 - v00) * sx;
-    const bottom = v01 + (v11 - v01) * sx;
-    return top + (bottom - top) * sy;
   }
 
   // -------------------------------------------------------------------------

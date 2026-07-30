@@ -1,7 +1,40 @@
 # Spec d53ccbb6-1 — `worldgenAt` is a pure function, and the world does not move
 
-Status: not started
+Status: **done** — 2026-07-30
 Epic: `d53ccbb6` · Target branch: `main--epic/d53ccbb6_lod-gate`
+
+## Result
+
+All five acceptance criteria met. `src/sim/worldgen.ts` holds `worldgenAt`,
+`worldgenConfig`, `seedBiome`, `latitudeHeat`, `fbm` and `periodicNoise`;
+`World.generate()` is a 12-line loop over it and the duplicate maths is gone.
+
+- `npm run typecheck` — clean.
+- `npm run sim:golden` — **`✓ 2 golden worlds unchanged`**, `still 3bc4c35b1b99adc7`,
+  `crucible 406cbd9ca84e3e3f`. `--update` was never run.
+- `npm run sim:check` — `✓ all invariants hold`, including the new **worldgen purity**
+  section: 34,560 tiles (240×144, seed 20260729) and 6,144 (96×64, seed 7) identical when
+  generated alone and out of order.
+
+**The one real trap, and it was live.** `generate()` wrote `heatOffset` and `moistOffset`
+into `Float32Array`s and then read them straight back out to compute `heat` and `moist`
+(`world.ts:935-939` as it stood) — so the biome a tile receives depends on **float32-rounded**
+offsets, while `elev` was passed to `seedBiome` as a raw double. `worldgenAt` reproduces
+that asymmetry with two `Math.fround` calls and no third. Rounding all three, or none,
+moves both hashes.
+
+**A defect in this spec's own acceptance criterion 5, caught and corrected.** As written it
+asked that `worldgenAt` agree tile-for-tile with `World.generate()`. Once `generate()` is a
+loop over `worldgenAt` that comparison is a function against itself and **cannot fail** — a
+green tick proving nothing. The check shipped instead tests the property materialization
+actually needs: a tile generated *in isolation, from a fresh config, in scattered order*
+matches the raster sweep. Fidelity is guarded by `sim:golden` (which runs the whole `World`
+path, unchanged from before the extraction); purity is guarded by the new check.
+
+**The new check was verified to discriminate**, per this repo's standing discipline that an
+unfailing test proves nothing: injecting a forgotten `out.elevation` write produced
+**13,152** mismatches at 240×144 and **1,792** at 96×64, and `sim:check` exited with 2
+invariant failures. Reverted; all three gates green on the shipped tree.
 
 ## Objective
 
