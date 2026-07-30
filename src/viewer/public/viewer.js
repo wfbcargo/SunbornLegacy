@@ -1135,7 +1135,8 @@ async function boot() {
   $('height').max = String(meta.limits.maxSide);
   $('width').min = String(meta.limits.minWidth);
   $('height').min = String(meta.limits.minHeight);
-  $('width').step = String(meta.limits.bandCols);
+  // Width has no step: any width from minWidth up is legal since the sweep evaluates
+  // whatever is left in the revolution. Height keeps step="2" — the torus needs it even.
 
   renderAddRow();
   syncComposerFromServer();

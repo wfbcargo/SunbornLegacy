@@ -26,6 +26,8 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 satisfiable, reachableCore(flagMask). Shared by invariants.ts and the
 │                 viewer, because invariants.ts cannot be imported (it is a script)
 ├── invariants.ts transition-graph checks (single SCC, reachability, rule-key uniqueness)
+│                 plus check 9, sweep coverage: every column evaluated once a day at any
+│                 width, measured through a zero-effect observer cycle (decision `0006`)
 ├── golden.ts     golden-world hash gate — has the simulation drifted?
 ├── sweep.ts      cycle-parameter sweep harness
 └── diagnose.ts   day-by-day trace of one disturbance cycle
@@ -45,8 +47,9 @@ src/viewer/       local world viewer — a DEV INSTRUMENT, not a product surface
 ## Data flow
 
 `WorldOptions` → `new World()` → worldgen fills `biome`/`moisture` →
-`stepDay()` advances a double-buffered band sweep (`bandWidth` columns per step,
-`ceil(width/bandWidth)` steps per day) → cycles contribute additively into a reused
+`stepDay()` advances a double-buffered band sweep (`ceil(width/bandWidth)` steps per day, up
+to `bandWidth` columns each — **the day's last band is SHORT rather than wrapped, so any width
+ages evenly**, decision `0006`) → cycles contribute additively into a reused
 `CycleEffect` per tile → rules in `RULES_BY_BIOME[biome]` roll against
 `rollAt(seed, tile, day, rule.keyHash)` — keyed on the rule's **content-derived identity**,
 never its array position, so reordering `RULES` changes precedence only (decision `0002`).

@@ -117,3 +117,21 @@ maximum dimension.
   handle a partial final band, or reject in the `World` constructor — changes or constrains
   simulation behaviour and therefore moves the golden hashes, so it needs its own spec behind
   R-010. Deliberately deferred, not overlooked.
+
+## Superseded — bound 2 is gone (spec `a6548ab1`, decision `0006`)
+
+The deferral above is over, and it ended differently than this entry predicted.
+
+`World.step()` now evaluates only the columns left in the revolution, so the day's last band
+is short instead of wrapped and **every width ages evenly**. Bound 2 is therefore deleted from
+`src/viewer/limits.ts` — `checkSize` accepts any width from `MIN_WIDTH` to `MAX_SIDE`, and
+`SizeLimits.bandCols` is gone with it. Bounds 1, 3 and 4 stand exactly as measured above; the
+measurement table for bound 2 stays in this entry and in `limits.ts` as the evidence for why
+the rule existed.
+
+**The claim that a sim-side fix "moves the golden hashes" was wrong, and it was wrong in the
+direction that costs work.** Both golden worlds are 160×96; 160 is a multiple of 8, so on
+those worlds the fixed `step()` takes the full-band branch on every step and the code path is
+bit-identical. `ea1caa9f367a0453` and `f4bece63b740b9e2` did not move — they are the *proof*
+the fix is surgical, not an obstacle to it. Reasoning about R-010 instead of running
+`npm run sim:golden` deferred a real defect behind a gate that was never closed.

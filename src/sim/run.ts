@@ -20,8 +20,13 @@ import {
   renderHistory, renderMap, renderNiches, sample, type Sample,
 } from './report.ts';
 
+// `lastIndexOf`, not `indexOf`: the LAST occurrence of a repeated flag wins, which is what
+// every other CLI does and what a person editing the end of a long command line means.
+// With `indexOf`, `--days 300 --days 500` silently ran 300 — the same class of quiet
+// wrongness as an npm-swallowed flag, and in this repo that one has already invalidated
+// recorded evidence once.
 function arg(name: string, fallback: number): number {
-  const i = process.argv.indexOf(`--${name}`);
+  const i = process.argv.lastIndexOf(`--${name}`);
   if (i === -1) return fallback;
   const v = Number(process.argv[i + 1]);
   return Number.isFinite(v) ? v : fallback;
@@ -45,7 +50,7 @@ const beamCycleDays = arg('beam-cycle', 360);
 // MORE alive world, so the representative world is the one with all of them. Use
 // `--cycles still` for the no-disturbance control, or `--beam` for the legacy
 // single-beam configuration the original SIMULATION.md numbers were taken with.
-const presetIdx = process.argv.indexOf('--cycles');
+const presetIdx = process.argv.lastIndexOf('--cycles');
 const presetName =
   presetIdx !== -1 ? process.argv[presetIdx + 1] ?? null : beam ? null : 'crucible';
 if (presetName !== null && !(presetName in CYCLE_PRESETS)) {

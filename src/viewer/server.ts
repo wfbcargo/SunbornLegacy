@@ -36,14 +36,16 @@ import { CHURN_WARMUP, HISTORY_DAYS, MAX_SPEED, MIN_SPEED, ViewerSession } from 
 // CLI
 // ---------------------------------------------------------------------------
 
+// `lastIndexOf`, not `indexOf`: the LAST occurrence of a repeated flag wins. See the same
+// note in `src/sim/run.ts` — `--port 4173 --port 4190` used to silently serve on 4173.
 function arg(name: string, fallback: number): number {
-  const i = process.argv.indexOf(`--${name}`);
+  const i = process.argv.lastIndexOf(`--${name}`);
   const v = i >= 0 ? Number(process.argv[i + 1]) : NaN;
   return Number.isFinite(v) ? v : fallback;
 }
 
 function argStr(name: string, fallback: string): string {
-  const i = process.argv.indexOf(`--${name}`);
+  const i = process.argv.lastIndexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1]! : fallback;
 }
 

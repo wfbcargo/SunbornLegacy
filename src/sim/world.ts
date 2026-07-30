@@ -29,10 +29,11 @@ import {
 export const TICKS_PER_DAY = 14_400;
 
 /**
- * Columns evaluated per sweep step, and therefore the divisor `width` must be a multiple
- * of: `stepDay()` runs `ceil(width / bandWidth)` steps of exactly `bandWidth` columns, so
- * any other width re-evaluates the overlap twice a day. Exported so validation derives it
- * rather than retyping the literal — see `src/viewer/limits.ts` and decision `0005`.
+ * Default columns evaluated per sweep step.
+ *
+ * `width` does NOT have to be a multiple of this. `stepDay()` runs
+ * `ceil(width / bandWidth)` steps and the day's LAST band is short rather than a full
+ * band that wraps — see `step()`. Any width ages evenly; decision `0006`.
  */
 export const DEFAULT_BAND_WIDTH = 8;
 
@@ -232,14 +233,36 @@ export class World {
     this.cycleStatesDay = day;
   }
 
-  /** Advance the gaze one band. */
+  /**
+   * Advance the gaze one band.
+   *
+   * ★ THE DAY'S LAST BAND IS SHORT, NOT WRAPPED.
+   * `stepsPerDay` is `ceil(width / bandWidth)`, so when the width is not a multiple of
+   * the band the final step of a revolution has fewer than `bandWidth` columns left in
+   * it. Evaluating a full band there runs past the end and lands back on columns already
+   * done today: measured with an observer cycle counting `affect` calls, width 250 at
+   * band 8 gave 1.024 evaluations/column/day, six columns doubled, and the doubled band
+   * DRIFTS as the days go by. Nothing crashes and no output shows it — the world just
+   * ages a couple of percent fast in a moving stripe. So the count is what is left in
+   * the revolution, and `gaze` never passes `width`.
+   *
+   * `gaze` is exactly `(steps % stepsPerDay) * bandWidth`: it starts a revolution at 0,
+   * the per-step counts sum to `width`, and the modulo returns it to 0 for the next one.
+   * Widths that already divided evenly take the `bandWidth` branch of the `min` on every
+   * step, so their behaviour is bit-identical to before this fix — which is why the
+   * 160-wide golden worlds did not move. Decision `0006`.
+   */
   step(): void {
     const { grid, biome, counts } = this;
     const day = Math.floor(this.day);
     if (day !== this.cycleStatesDay) this.refreshCycles(day);
 
-    for (let b = 0; b < this.bandWidth; b++) {
-      const col = (this.gaze + b) % grid.width;
+    // Columns remaining in this revolution. Always >= 1: gaze is in [0, width).
+    const cols = Math.min(this.bandWidth, grid.width - this.gaze);
+
+    for (let b = 0; b < cols; b++) {
+      // In range by construction — gaze + cols <= width — so no wrap is needed here.
+      const col = this.gaze + b;
 
       for (let row = 0; row < grid.height; row++) {
         const i = row * grid.width + col;
@@ -247,7 +270,7 @@ export class World {
       }
     }
 
-    this.gaze = (this.gaze + this.bandWidth) % grid.width;
+    this.gaze = (this.gaze + cols) % grid.width;
     this.steps++;
   }
 

@@ -15,32 +15,32 @@
  */
 
 import { CYCLE_CATALOGUE, cycleCatalogueEntry, type CycleSpec } from '../sim/cycles.ts';
-import { DEFAULT_BAND_WIDTH } from '../sim/world.ts';
 
-/**
- * Columns evaluated per sweep step — `World`'s default `bandWidth`, which the viewer
- * never overrides.
+/*
+ * ★ THERE IS NO LONGER A SWEEP-BAND RULE ON THE WIDTH, and the reason is worth keeping
+ * because it is the shape of thing this file is for.
  *
- * WIDTH MUST BE A MULTIPLE OF THIS, and that is a measured requirement, not tidiness.
- * `stepDay()` runs `ceil(width / bandWidth)` steps and each step advances the gaze by
- * exactly `bandWidth` columns, so when the width is not a multiple the last step of the
- * day overlaps the first. MEASURED with a zero-effect observer cycle counting `affect`
- * calls per column over one day at height 16:
+ * `stepDay()` runs `ceil(width / bandWidth)` steps, and `step()` used to evaluate exactly
+ * `bandWidth` columns every time, so a width that was not a multiple of the band made the
+ * day's last step wrap onto columns already done. MEASURED with a zero-effect observer
+ * cycle counting `affect` calls per column over one day:
  *
  *     width 240  (240 % 8 = 0)   1.000 evaluations/column/day, 0 columns doubled
  *     width 244  (244 % 8 = 4)   1.016 evaluations/column/day, 4 columns doubled
  *     width 250  (250 % 8 = 2)   1.024 evaluations/column/day, 6 columns doubled
  *     width 100  (100 % 8 = 4)   1.040 evaluations/column/day, 4 columns doubled
  *
- * A doubled column ages twice as fast for that day, and the doubled band drifts across
- * the map as the days go by. Nothing crashes, which is exactly why it is worth
- * rejecting: the world simply runs a few percent fast in a way no output would show.
+ * This file rejected those widths for a while, which was the right call at the time — a
+ * doubled column ages twice as fast, the doubled stripe drifts, and nothing crashes — but
+ * a validator standing in for a simulator bug only covers the callers that go through it,
+ * and `npm run sim -- --width 250` never did. The defect is fixed in `World.step()`: the
+ * day's last band is now SHORT rather than wrapped, every width ages evenly, and invariant
+ * check 9 (`sweep coverage`) measures it at widths that divide the band and widths that do
+ * not. Decisions `0005` and `0006`.
  *
- * Derived from the sim's own default rather than retyped — the true rule is "a multiple of
- * the world's `bandWidth`", which is a `WorldOptions` knob. A caller passing a non-default
- * `bandWidth` needs a different divisor, and this constant would not know.
+ * The measurement above is kept as the evidence for why the rule existed, not as a live
+ * constraint. Any width from MIN_WIDTH to MAX_SIDE is legal now.
  */
-export const BAND_COLS = DEFAULT_BAND_WIDTH;
 
 /**
  * Smallest sensible world.
@@ -98,7 +98,6 @@ export interface SizeLimits {
   minHeight: number;
   maxSide: number;
   maxTiles: number;
-  bandCols: number;
 }
 
 export const SIZE_LIMITS: SizeLimits = {
@@ -106,7 +105,6 @@ export const SIZE_LIMITS: SizeLimits = {
   minHeight: MIN_HEIGHT,
   maxSide: MAX_SIDE,
   maxTiles: MAX_TILES,
-  bandCols: BAND_COLS,
 };
 
 /**
@@ -137,14 +135,8 @@ export function checkSize(width: unknown, height: unknown): string | null {
       'bottom row, and odd heights flip hex row parity across that seam, so the two ' +
       'edges join up wrong. The grid refuses to build at all.';
   }
-  if (width % BAND_COLS !== 0) {
-    const near = Math.round(width / BAND_COLS) * BAND_COLS;
-    return `Width must be a multiple of ${BAND_COLS}, the sweep band (try ${near}). The sun ` +
-      `evaluates ${BAND_COLS} columns per step and ceil(width/${BAND_COLS}) steps per day, so any ` +
-      'other width makes the last step of the day overlap the first: measured at width ' +
-      '250, six columns are evaluated twice a day and the world ages 2.4% fast in a ' +
-      'drifting band. Nothing crashes, which is why it is rejected here.';
-  }
+  // No width-multiple check. The sweep band no longer constrains the width — see the
+  // note at the top of this file and `World.step()`.
   if (width * height > MAX_TILES) {
     return `${(width * height).toLocaleString()} tiles is over the ${MAX_TILES.toLocaleString()}-tile ` +
       'ceiling. What bounds it is step time, not the canvas: measured at the ceiling, ' +

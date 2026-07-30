@@ -55,23 +55,33 @@ Non-obvious pitfalls. One line per entry. Things that bit us once.
 - **The typecheck gate found nothing on the day it was added.** All 94 errors from the first
   `tsc --noEmit` were missing host globals; there were zero substantive type errors. Its value
   is entirely prospective — do not read "94 errors" as "94 bugs fixed".
-- **A world's width must be a multiple of `bandWidth` (8), or time runs fast in a drifting
-  band.** `stepDay()` runs `ceil(width/8)` steps of exactly 8 columns, so any other width makes
-  the day's last step overlap its first. Measured with an observer cycle: width 250 evaluates
-  six columns twice a day (1.024 evals/column/day), width 100 evaluates four twice (1.040).
-  **Nothing crashes and no output shows it.** Every width in the repo happens to divide by 8.
-  8 is only the *default*: `bandWidth` is a `WorldOptions` knob, so the true rule is "a
-  multiple of the world's `bandWidth`" — validation derives it from `DEFAULT_BAND_WIDTH`
-  rather than retyping 8. **The check lives in `src/viewer/limits.ts`, so it guards the
-  viewer only** — `npm run sim -- --width 250` still silently builds the fast-ageing world.
-  The defect is in `World.stepDay`; a sim-side fix moves the golden hashes (R-010).
-  `checkSize` rejects the rest. Decision `0005`.
+- **~~A world's width must be a multiple of `bandWidth` (8), or time runs fast in a drifting
+  band.~~ FIXED — any width ages evenly. Decision `0006`.** The measurement stays because it
+  is the evidence. `stepDay()` runs `ceil(width/8)` steps and `step()` used to evaluate exactly
+  8 columns every time, so any other width made the day's last step overlap its first. Measured
+  with a zero-effect observer cycle: width 250 evaluated six columns twice a day (1.024
+  evals/column/day), width 100 evaluated four twice (1.040), width 244 four twice (1.016).
+  **Nothing crashed and no output showed it** — the world just aged a couple of percent fast in
+  a stripe that drifted. `step()` now evaluates only what is left in the revolution, so the
+  day's last band is SHORT rather than wrapped, and `src/viewer/limits.ts` no longer has a
+  width rule (even height and the tile-count ceiling remain). Two things about it are worth
+  keeping in mind:
+  - **The rejection had never covered the sim.** `npm run sim -- --width 250` went straight past
+    the viewer's `checkSize` and built the fast-ageing world anyway. A validator standing in for
+    a simulator bug only guards the callers that route through it.
+  - **The predicted golden-hash movement did not happen, and the reason is worth internalising
+    before deferring a fix on that basis again.** Decision `0005` recorded the sim-side fix as
+    blocked because it "moves the golden hashes (R-010)". It does not: both golden worlds are
+    160×96, 160 divides 8, and on any such width the new `min` takes the `bandWidth` branch on
+    every step, so the code path is bit-identical. `ea1caa9f367a0453` and `f4bece63b740b9e2`
+    are unchanged, and that is the fix's primary correctness signal rather than an obstacle.
+    "This touches stepping code, so it must move the hashes" is a guess; running it is cheap.
 - **Height must be even and `HexTorus` throws if it is not** — odd-r parity breaks where the
   torus stitches its last row to its first. Validate before constructing: `ViewerSession.reset`
   now builds into a local and commits only on success, because assigning `height` and *then*
   throwing left the session reporting a height its world did not have, and the client slices
   the frame's byte planes by exactly that number.
-- **Never import from `src/sim/invariants.ts`.** It is a script: eight checks run at module
+- **Never import from `src/sim/invariants.ts`.** It is a script: nine checks run at module
   scope and it calls `process.exit`. Importing it to reuse a function would run a ~75-second
   test suite and then kill the importing process. The reusable half lives in
   `src/sim/reachability.ts`.

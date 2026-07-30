@@ -17,7 +17,7 @@
  * invisible until a player is standing on it: a TRAP NODE — one biome, usually a newly
  * added one, that everything flows into and nothing flows out of.
  *
- * Eight checks, all fatal:
+ * Nine checks, all fatal:
  *   1  taxonomy hygiene — unique ids, keys, glyphs, colours, materials, RULE KEYS
  *   2  single strongly connected component over all 22 biomes (Tarjan)
  *   3  no trap nodes, no unreachable nodes, no biome with a single exit
@@ -28,6 +28,7 @@
  *      still world
  *   7  the required chemistry from the design brief is present as direct edges
  *   8  no biome family LATCHES on a live world — the check the graph cannot make
+ *   9  the solar sweep covers every column exactly once a day, at ANY width
  *
  * Check 8 is there because checks 2-5 are all necessary and none of them is
  * sufficient. "This rule fires above heat 30" and "a tile that IS this biome can ever
@@ -44,14 +45,16 @@
 import {
   ACKNOWLEDGED_EDGE_OVERLAPS, BIOME_COUNT, BIOMES, Biome, RULES, type Rule,
 } from './biomes.ts';
-import { CYCLE_PRESETS } from './cycles.ts';
+import {
+  CYCLE_PRESETS, WorldCycle, type CycleDescription, type CycleEffect,
+} from './cycles.ts';
 // The graph and satisfiability machinery lives in `reachability.ts` so that the viewer
 // can run the same analysis on an arbitrary composed cycle set. It cannot import THIS
 // file: everything here executes at module scope and exits the process.
 import {
   buildAdjacency, flagMaskForKinds, reachableCore, satisfiable, tarjan,
 } from './reachability.ts';
-import { World } from './world.ts';
+import { DEFAULT_BAND_WIDTH, World } from './world.ts';
 
 const COLOUR = process.env.NO_COLOR === undefined && process.env.TERM !== 'dumb';
 const bold = (s: string) => (COLOUR ? `\x1b[1m${s}\x1b[0m` : s);
@@ -511,6 +514,143 @@ section('escapability in a live world');
         (offenders.length > 0 ? dim(`   ${offenders.join(', ')}`) : ''),
     );
   }
+}
+
+// ===========================================================================
+// 9 — the sweep covers every column exactly once a day, at every width
+// ===========================================================================
+
+section('sweep coverage');
+{
+  // The check that would have caught the partial-band bug (decision `0006`).
+  //
+  // `stepsPerDay` is `ceil(width / bandWidth)`, and `step()` used to evaluate exactly
+  // `bandWidth` columns every time. When the width was not a multiple of the band, the
+  // day's final band ran past the end and wrapped onto columns already done — so those
+  // columns aged twice that day, and the doubled stripe DRIFTED as `gaze` accumulated a
+  // per-day offset. Nothing crashed and no output revealed it, which is the whole reason
+  // it survived long enough to need a check: the world simply ran a few percent fast.
+  //
+  // It is measured, not reasoned about, and measured through the real `step()` — a
+  // closed-form re-derivation of which columns a step visits would be a second
+  // implementation of the sweep, free to agree with itself while disagreeing with the
+  // simulator. `WorldOptions.cycles` accepts instances, so the instrument is a zero-effect
+  // observer cycle and the production code needs no test hook at all.
+  //
+  // Both halves of the property are asserted from one recording:
+  //   - every column is evaluated exactly once per `stepDay()`;
+  //   - the SEQUENCE is 0,1,…,width-1 and then starts again at 0, which is what
+  //     "`gaze` returned to its starting value" means observably from outside the class.
+  // Checking the order and not just the totals matters: a fix that visited the right
+  // number of columns while sliding the band's phase by a column a day would pass a
+  // count-only check and still age the world in a moving stripe.
+  class ColumnObserver extends WorldCycle<number> {
+    /** Times `affect` was called for each column. */
+    readonly hits: Int32Array;
+    /** Column visit order, consecutive duplicates (the rows of one column) collapsed. */
+    readonly order: number[] = [];
+
+    constructor(width: number) {
+      super('observer', 'observer');
+      this.hits = new Int32Array(width);
+    }
+
+    /** Never dormant, so `World` keeps calling `affect`. Contributes nothing. */
+    dayState(day: number): number {
+      return day;
+    }
+
+    affect(_state: number, _out: CycleEffect, col: number, _row: number): void {
+      this.hits[col]!++;
+      if (this.order[this.order.length - 1] !== col) this.order.push(col);
+    }
+
+    describe(): CycleDescription {
+      return {
+        key: this.key, kind: this.kind, label: 'observer', summary: 'test instrument',
+        periodDays: 1, flags: [], params: {},
+      };
+    }
+  }
+
+  // Widths that divide the band evenly, widths that do not, and a width BELOW the band
+  // (one short step is the whole day). Band widths other than the default are covered
+  // because `bandWidth` is a `WorldOptions` knob and the fix has to hold for any value —
+  // including 1 (every column its own step) and a band wider than the world.
+  const DAYS = 3;
+  const H = 8;
+  const cases: { width: number; bandWidth?: number }[] = [
+    { width: 240 },
+    { width: 244 },
+    { width: 250 },
+    { width: 100 },
+    { width: 5 },
+    { width: 250, bandWidth: 1 },
+    { width: 250, bandWidth: 7 },
+    { width: 250, bandWidth: 64 },
+    { width: 250, bandWidth: 250 },
+    { width: 100, bandWidth: 300 },
+  ];
+
+  console.log(dim(`  width × band   steps/day   evals/column/day over ${DAYS} days`));
+  for (const { width, bandWidth } of cases) {
+    const band = bandWidth ?? DEFAULT_BAND_WIDTH;
+    const observer = new ColumnObserver(width);
+    const world = new World({ width, height: H, seed: 20260729, bandWidth, cycles: [observer] });
+    for (let d = 0; d < DAYS; d++) world.stepDay();
+
+    const label = `${width} × ${band}`;
+    const expected = DAYS * H;
+    let doubled = 0;
+    let missed = 0;
+    for (let c = 0; c < width; c++) {
+      if (observer.hits[c]! > expected) doubled++;
+      else if (observer.hits[c]! < expected) missed++;
+    }
+    const perColumn = observer.order.length / width / DAYS;
+    const stepsPerDay = Math.ceil(width / band);
+
+    if (doubled > 0 || missed > 0) {
+      fail(
+        `sweep at width ${width} band ${band}: ${doubled} column(s) evaluated more than once ` +
+          `per day and ${missed} fewer — ${perColumn.toFixed(3)} evaluations/column/day, ` +
+          'must be exactly 1.000',
+      );
+    }
+
+    // Order. A deviation localises the mistake to one visit, which a total cannot.
+    const wanted = width * DAYS;
+    let orderProblem: string | null = null;
+    if (observer.order.length !== wanted) {
+      orderProblem =
+        `${observer.order.length} column visits over ${DAYS} days, expected ${wanted} ` +
+        `(${width} columns × ${DAYS}) — the sweep ` +
+        (observer.order.length > wanted ? 'revisits columns within a day' : 'stops short of the width');
+    } else {
+      for (let k = 0; k < wanted; k++) {
+        if (observer.order[k] === k % width) continue;
+        orderProblem =
+          `visit ${k} was column ${observer.order[k]}, expected ${k % width} — the band's phase ` +
+          'drifts, so the gaze does not return to its starting column after a full stepDay()';
+        break;
+      }
+    }
+    if (orderProblem !== null) fail(`sweep at width ${width} band ${band}: ${orderProblem}`);
+
+    const ok = doubled === 0 && missed === 0 && orderProblem === null;
+    console.log(
+      `  ${label.padEnd(13)} ${String(stepsPerDay).padStart(7)}   ` +
+        `${ok ? green('✓') : red('✗')} ${perColumn.toFixed(3)}` +
+        (bandWidth === undefined ? dim('   (default band)') : ''),
+    );
+  }
+  console.log(
+    dim(
+      '\n  A zero-effect observer cycle counts real `affect` calls per column, so this\n' +
+        '  measures the sweep the simulator actually runs. Before the fix, 244/250/100\n' +
+        '  read 1.016/1.024/1.040 here — see decision `0006`.',
+    ),
+  );
 }
 
 // ===========================================================================
