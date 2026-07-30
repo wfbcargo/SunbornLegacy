@@ -383,6 +383,27 @@ const server = createServer((req, res) => {
   });
 });
 
+/**
+ * A startup failure should name the constraint, exactly like `checkSize` does for a bad
+ * width — not dump a `node:events` stack trace. EADDRINUSE is by far the likeliest one:
+ * a viewer from an earlier session is still bound, and the raw throw tells the reader
+ * nothing about the `--port` flag that fixes it.
+ */
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(
+      `\n  Port ${PORT} is already in use — another viewer is probably still running.\n\n` +
+        `  Use a different port:  npm run viewer -- --port ${PORT + 1}\n` +
+        `  Or stop whatever is bound to ${PORT} — closing its terminal is enough.\n`,
+    );
+  } else if (err.code === 'EACCES') {
+    console.error(`\n  Not allowed to bind port ${PORT}. Try a port above 1024.\n`);
+  } else {
+    console.error(`\n  The viewer could not start: ${err.message}\n`);
+  }
+  process.exit(1);
+});
+
 // R-009: localhost only. Not a host, not 0.0.0.0, not configurable.
 server.listen(PORT, '127.0.0.1', () => {
   const { width, height, seed, preset, cycles } = session;
