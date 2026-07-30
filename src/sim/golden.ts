@@ -29,9 +29,11 @@
  * TWO CASES, CHOSEN SO A FAILURE LOCALISES
  * ----------------------------------------
  * `still` has no cycles at all, so it exercises worldgen, the hydrology and the
- * climate-gated rules and nothing else. `crucible` runs all five cycles. If both drift,
- * suspect worldgen or the hydrology; if only `crucible` does, suspect the cycles or the
- * cycle-gated rules. One hash tells you something broke; two tell you roughly where.
+ * climate-gated rules and nothing else. `crucible` runs all six cycles — one of every
+ * kind in the catalogue, `weather` included, so a world-reading cycle is under this gate
+ * on every run. If both drift, suspect worldgen or the hydrology; if only `crucible`
+ * does, suspect the cycles or the cycle-gated rules. One hash tells you something broke;
+ * two tell you roughly where.
  *
  * ★ SCOPE OF THE GUARANTEE. This pins the simulation against ITSELF on a given
  * JavaScript engine — it is a regression test, not a cross-platform conformance test.
@@ -77,7 +79,7 @@ const CASES: readonly GoldenCase[] = [
     height: 96,
     seed: 20260729,
     days: 500,
-    hash: 'ea1caa9f367a0453',
+    hash: '10468117cccd7501',
   },
   {
     name: 'crucible',
@@ -86,7 +88,7 @@ const CASES: readonly GoldenCase[] = [
     height: 96,
     seed: 20260729,
     days: 500,
-    hash: 'f4bece63b740b9e2',
+    hash: '599d7815137a0a4f',
   },
 ];
 

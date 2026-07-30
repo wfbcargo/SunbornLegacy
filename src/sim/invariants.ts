@@ -12,14 +12,14 @@
  *     any other, however long and however rare the events it needs.
  *
  * Both at once is exactly "the transition graph is a single strongly connected
- * component", so a Tarjan pass over 22 nodes settles it in milliseconds and can be run
+ * component", so a Tarjan pass over 23 nodes settles it in milliseconds and can be run
  * on every ruleset change. What it catches is the failure mode that is otherwise
  * invisible until a player is standing on it: a TRAP NODE — one biome, usually a newly
  * added one, that everything flows into and nothing flows out of.
  *
  * Nine checks, all fatal:
  *   1  taxonomy hygiene — unique ids, keys, glyphs, colours, materials, RULE KEYS
- *   2  single strongly connected component over all 22 biomes (Tarjan)
+ *   2  single strongly connected component over all 23 biomes (Tarjan)
  *   3  no trap nodes, no unreachable nodes, no biome with a single exit
  *   4  no DERIVED rule duplicating a hand-written edge (the fan-out rate hazard)
  *   5  every rule's precondition is satisfiable somewhere in climate x flag space
@@ -167,7 +167,7 @@ section('taxonomy');
   //   - a duplicate STRING key means two rules are genuinely indistinguishable, which is
   //     an authoring mistake (usually a copy-pasted label on a duplicated edge);
   //   - a duplicate HASH with distinct strings is a 32-bit FNV-1a collision. Vanishingly
-  //     unlikely at ~160 rules and completely invisible if it ever happened, which is
+  //     unlikely at 185 rules and completely invisible if it ever happened, which is
   //     exactly why it is worth a Set rather than an appeal to the birthday bound.
   const ruleKeys = RULES.map((r) => r.key);
   const keysUnique = dupes('rule keys', ruleKeys);
@@ -597,6 +597,24 @@ section('sweep coverage');
     const band = bandWidth ?? DEFAULT_BAND_WIDTH;
     const observer = new ColumnObserver(width);
     const world = new World({ width, height: H, seed: 20260729, bandWidth, cycles: [observer] });
+
+    // ★ CONSTRUCTION IS NOT A SWEEP, and this instrument cannot tell the difference on
+    // its own — it counts `affect` calls, so anything that calls `affect` while the
+    // world is being built lands in the same tally as a real day and inflates the ratio
+    // this check exists to read. Measured: one whole-grid `affect` pass during
+    // construction reports 3.667 evaluations/column/day over three days instead of
+    // 1.000, i.e. a green check turns red for a reason that has nothing to do with the
+    // sweep. Asserting the zero here localises that mistake to the constructor.
+    let built = observer.order.length;
+    for (let c = 0; c < width; c++) built += observer.hits[c]!;
+    if (built !== 0) {
+      fail(
+        `sweep at width ${width} band ${band}: the constructor called \`affect\` ` +
+          `${built} time(s) before a single day was stepped — construction is not a ` +
+          'sweep, and those calls would be counted as one.',
+      );
+    }
+
     for (let d = 0; d < DAYS; d++) world.stepDay();
 
     const label = `${width} × ${band}`;

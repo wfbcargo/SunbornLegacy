@@ -46,10 +46,25 @@ import { CYCLE_CATALOGUE, cycleCatalogueEntry, type CycleSpec } from '../sim/cyc
  * Smallest sensible world.
  *
  * The hard floor is much lower — the neighbour table only degenerates below 3 columns
- * or 4 rows, where a tile becomes its own neighbour — but a world narrower than twice
- * the beam band (8 columns) or shorter than twice the default monsoon band (9 rows) is
- * a world where a single default cycle covers everything at once, every day. That is
- * not a small world, it is a world with no geography for weather to happen in.
+ * or 4 rows, where a tile becomes its own neighbour — but a world shorter than twice the
+ * default monsoon band (9 rows) is a world where a single default cycle covers
+ * everything at once, every day. That is not a small world, it is a world with no
+ * geography for weather to happen in.
+ *
+ * ★ THIS IS NO LONGER THE BEAM'S CONSTRAINT. It used to be justified by "twice the beam
+ * band (8 columns)", which was a fact about a band beam and is now a fact about one of
+ * two shapes. The blob's constraint is a different shape of statement — it depends on a
+ * PARAMETER, not on a constant — so it cannot live in a size floor at all:
+ *
+ *     2 * radiusHexes + 1 < min(width, height)
+ *
+ * A disc wider than the world is a disc that wraps onto itself, at which point the torus
+ * distance stops being well defined (`hexDistanceWithin` guarantees an exact wrap only
+ * under half the height) and the "travelling focus" is just a permanent global heat
+ * offset. The shipped default radius of 16 needs 34×34, which is comfortably above this
+ * floor and comfortably below the smallest world anyone builds — but a 16×16 world with
+ * a default beam is illegal and `checkCycles` says so, with both numbers, rather than
+ * the floor quietly banning small worlds that have no beam at all.
  */
 export const MIN_WIDTH = 16;
 export const MIN_HEIGHT = 16;
@@ -58,28 +73,35 @@ export const MIN_HEIGHT = 16;
  * Largest world, as a tile count rather than per-axis, because every cost that matters
  * scales with the product.
  *
- * MEASURED on this machine (Node 24, one `stepDay` averaged over 20 days after a
- * 5-day warm-up), the simulation is linear in tiles at ~92 ns/tile with no cycles and
- * ~125 ns/tile with all five:
+ * RE-MEASURED on this machine (Node 24, one `stepDay` averaged over 20 days after a
+ * 5-day warm-up) at `still` / `crucible`. ★ THE NUMBERS BELOW REPLACE A SET THAT WAS
+ * ROUGHLY HALF THIS, and both halves of the reason are real: `crucible` now carries SIX
+ * cycles of six kinds rather than five, and the per-tile work itself has grown — the
+ * stored thermal filter and its daily water field, the weather layer, and this spec's
+ * river ring and elevation gather. The simulation is still linear in tiles, at
+ * ~125-175 ns/tile with no cycles and ~216-306 ns/tile with all six:
  *
- *     240×144    34,560 tiles    3.2 / 4.3 ms      68 KiB per frame
- *     320×192    61,440 tiles    5.6 / 7.9 ms     120 KiB
- *     480×288   138,240 tiles   12.5 / 17.1 ms    270 KiB
- *     640×384   245,760 tiles   22.6 / 30.1 ms    480 KiB
- *     960×576   552,960 tiles   51.7 / 68.4 ms   1080 KiB
+ *     240×144    34,560 tiles    4.5 /  8.0 ms     68 KiB per frame
+ *     320×192    61,440 tiles    7.7 / 13.5 ms    120 KiB
+ *     480×288   138,240 tiles   17.1 / 29.9 ms    270 KiB
+ *     640×384   245,760 tiles   36.0 / 68.3 ms    480 KiB
+ *     512×512   262,144 tiles   45.8 / 80.1 ms    512 KiB   ← exactly the cap
  *
  * The cap is set at 262,144 tiles, and what bounds it is STEP TIME, not the canvas and
- * not the frame. Measured IN THE VIEWER at exactly the cap (512×512, all five cycles):
- * 42.2 ms per simulated day, 512 KiB per frame, 48 ms for a full client redraw, and a
- * 10,653×9,222 canvas at the maximum hex size.
+ * not the frame — that conclusion is unchanged and is now held by a wider margin than
+ * when it was drawn.
  *
  *   - Step time. `ViewerSession.schedule` delivers speeds above 20 days/second as
  *     several days per timer tick, so at the top speed of 60 it steps 3 days in one
- *     synchronous block: ~127 ms of blocked event loop per tick at the cap, which is
- *     already at the edge of a viewer meant to feel live. At 960×576 the same figure is
- *     over 200 ms and playback visibly stalls between frames. Note the viewer's number
- *     is ~25% above the bare `stepDay` cost above, because a viewer day also samples
- *     the world and serves frames.
+ *     synchronous block: ~240 ms of blocked event loop per tick at the cap with six
+ *     cycles. ★ THAT IS PAST "FEELS LIVE", NOT AT THE EDGE OF IT. The comment this
+ *     replaces claimed ~127 ms and was written against a five-cycle world with a
+ *     cheaper tile. A GM who builds a 512×512 `crucible` world and plays it at 60
+ *     days/second will see playback stall; the honest fix is a smaller world or a
+ *     lower speed, and the honest thing to record is that the cap now sits above the
+ *     comfortable range rather than at its top. Lowering `MAX_TILES` is a product
+ *     decision and is deliberately NOT taken here — see spec `2915cb06-5`, which was
+ *     scoped to re-measure this justification, not to re-set the bound.
  *   - Canvas. At the maximum hex radius of 12 a tile costs ~374 canvas pixels, so
  *     Chrome's ~268 Mpx canvas area limit is not reached until ~717,000 tiles — 2.7×
  *     the cap. Measured at the cap: 98.2 Mpx, allocated and drawn without complaint.
@@ -123,8 +145,10 @@ export function checkSize(width: unknown, height: unknown): string | null {
   }
   if (width < MIN_WIDTH || height < MIN_HEIGHT) {
     return `The world must be at least ${MIN_WIDTH}×${MIN_HEIGHT}. Below that a single ` +
-      'default cycle — an 8-column beam band, a 9-row monsoon band — covers the whole ' +
-      'map at once, and there is no geography left for the weather to move across.';
+      'default cycle — a 9-row monsoon band — covers the whole map at once, and there ' +
+      'is no geography left for the weather to move across. The beam has its own, ' +
+      'sharper constraint, because its size is a parameter: a blob beam needs ' +
+      '2 × radius + 1 columns and rows to fit in.';
   }
   if (width > MAX_SIDE || height > MAX_SIDE) {
     return `Neither axis may exceed ${MAX_SIDE}. At the maximum hex size a wider world ` +
@@ -140,8 +164,8 @@ export function checkSize(width: unknown, height: unknown): string | null {
   if (width * height > MAX_TILES) {
     return `${(width * height).toLocaleString()} tiles is over the ${MAX_TILES.toLocaleString()}-tile ` +
       'ceiling. What bounds it is step time, not the canvas: measured at the ceiling, ' +
-      'five cycles cost 42 ms per simulated day, so playing at 60 days/second steps ' +
-      'three days in one ~127 ms block of the server’s event loop. Past that the viewer ' +
+      'six cycles cost 80 ms per simulated day, so playing at 60 days/second steps ' +
+      'three days in one ~240 ms block of the server’s event loop. Past that the viewer ' +
       'stops feeling live.';
   }
   return null;
@@ -154,7 +178,7 @@ export function checkSize(width: unknown, height: unknown): string | null {
 /**
  * Validate a composed cycle set, returning a message or null.
  *
- * Three things are checked, and the third is the interesting one:
+ * Four things are checked, and the third is the interesting one:
  *
  *   - the kind exists (otherwise `makeCycle` throws and the request 500s);
  *   - every parameter is known to the catalogue and inside its declared range —
@@ -164,8 +188,12 @@ export function checkSize(width: unknown, height: unknown): string | null {
  *     kind)`), so two cycles of one kind sharing a key are not two cycles — they are
  *     one cycle evaluated twice, with identical fault lines, vents and phase. Two
  *     monsoons out of phase is a legitimate world and this is what keeps it possible.
+ *   - a blob beam FITS THE WORLD, when a world size is supplied. This is the one check
+ *     that cannot be made from the cycle set alone, which is why the size is optional:
+ *     the reachability endpoint asks about a cycle set with no world attached and must
+ *     not be forced to invent one.
  */
-export function checkCycles(cycles: unknown): string | null {
+export function checkCycles(cycles: unknown, width?: number, height?: number): string | null {
   if (!Array.isArray(cycles)) return 'Cycles must be a list.';
   if (cycles.length > 32) return 'A world may hold at most 32 cycles.';
 
@@ -205,14 +233,20 @@ export function checkCycles(cycles: unknown): string | null {
         if (typeof value !== 'boolean') return `"${kind}.${name}" must be true or false.`;
         continue;
       }
+      // Choices are checked first and by IDENTITY, because a choice may be a string —
+      // the beam's `shape` is `band` or `blob`, two geometries rather than two points on
+      // a scale. Falling through to the numeric checks would reject every legal value.
+      if (def.type === 'choice') {
+        if (!(def.choices ?? []).includes(value as number | string)) {
+          return `"${kind}.${name}" must be one of ${(def.choices ?? []).join(', ')}.`;
+        }
+        continue;
+      }
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         return `"${kind}.${name}" must be a finite number.`;
       }
       if (def.type === 'integer' && !Number.isInteger(value)) {
         return `"${kind}.${name}" must be a whole number.`;
-      }
-      if (def.type === 'choice' && !(def.choices ?? []).includes(value)) {
-        return `"${kind}.${name}" must be one of ${(def.choices ?? []).join(', ')}.`;
       }
       if (def.min !== undefined && value < def.min) {
         return `"${kind}.${name}" must be at least ${def.min}. ${def.note}`;
@@ -221,6 +255,49 @@ export function checkCycles(cycles: unknown): string | null {
         return `"${kind}.${name}" must be at most ${def.max}. ${def.note}`;
       }
     }
+
+    const fitError = checkBeamFits(kind, spec, width, height);
+    if (fitError !== null) return fitError;
   }
   return null;
+}
+
+/**
+ * Does a blob beam fit inside the world it is being put in?
+ *
+ * `2 * radius + 1 < min(width, height)`. A disc as wide as the world wraps onto itself,
+ * which breaks the torus distance the sweep is measured with and turns a travelling
+ * focus into a permanent global heat offset — the beam stops being a disturbance and
+ * becomes a climate constant, which is precisely the thing a purge is not.
+ *
+ * The message names the radius, the span it needs and the world it was given, because
+ * the person reading it is choosing between two numbers and either one is a valid fix.
+ */
+function checkBeamFits(
+  kind: string,
+  spec: Record<string, unknown>,
+  width?: number,
+  height?: number,
+): string | null {
+  if (kind !== 'solarbeam') return null;
+  if (typeof width !== 'number' || typeof height !== 'number') return null;
+
+  const defaults = cycleCatalogueEntry('solarbeam').params;
+  const value = (name: string): unknown =>
+    spec[name] ?? defaults.find((p) => p.name === name)?.default;
+
+  if (value('shape') !== 'blob') return null;
+  const radius = value('radiusHexes');
+  if (typeof radius !== 'number') return null;
+
+  const span = 2 * radius + 1;
+  const smallest = Math.min(width, height);
+  if (span < smallest) return null;
+  return (
+    `A blob beam of radius ${radius} is ${span} hexes across and does not fit in a ` +
+    `${width}×${height} world — it needs both axes above ${span}. A disc as wide as the ` +
+    'world wraps onto itself and stops being a travelling focus at all: every tile is ' +
+    'under it every day, which is a climate constant, not a purge. Lower the radius or ' +
+    'raise the smaller axis.'
+  );
 }

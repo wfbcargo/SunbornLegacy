@@ -15,7 +15,7 @@ validated, and what is not.
 | **`PITCH.md`** | The elevator version — world, pitch, audience, how it plays. Start here. | Current |
 | **`BRAINSTORM.md`** | The full design record, 12 sessions. Every decision with the reasoning that produced it, plus corrections and open questions. ~1,550 lines. | Current; the authoritative design source |
 | **`ARCHITECTURE.md`** | Technical architecture — data model, API contract, simulation, realtime, economy, build sequence. ~2,000 lines. | ⚠️ See caveat below |
-| **`SIMULATION.md`** | Findings from the terrain simulator, with verified numbers | Current — re-verified 2026-07-29 |
+| **`SIMULATION.md`** | Findings from the terrain simulator, with verified numbers | Current — re-measured 2026-07-30 in one pass |
 
 `BRAINSTORM.md` is the source of truth for *design*. Where `ARCHITECTURE.md` and
 `BRAINSTORM.md` disagree, brainstorm wins on intent and architecture wins on mechanism —
@@ -41,7 +41,7 @@ that extension intact.
 
 ---
 
-## Current state — 2026-07-29
+## Current state — 2026-07-30
 
 ### Decided and stable
 The pillars in `BRAINSTORM.md` are settled unless explicitly marked open:
@@ -64,8 +64,8 @@ Everything else:
 npm run typecheck    # tsc --noEmit — merge gate (R-002)
 npm run sim:golden   # golden-world hashes — merge gate (R-010)
 npm run sim          # full run, map + charts + both liveness tests
-npm run sim:check    # transition-graph + sweep-coverage invariants
-npm run sim:sweep    # cycle parameter sweep
+npm run sim:check    # transition graph + escapability + sweep coverage
+npm run sim:sweep    # cycle parameter sweep + the 40-game-year coastline membrane
 npm run sim:trace    # day-by-day trace of one disturbance cycle
 ```
 
@@ -77,6 +77,30 @@ the evidence recorded in this very file (see `SIMULATION.md` bug #8).
 devDependencies. The simulator and viewer run from a bare checkout.
 
 ### Built
+- **`src/sim/`** — headless terrain simulator. TypeScript, runs natively on Node 24, **zero
+  runtime dependencies, no build step.** `typescript` and `@types/node` are devDependencies,
+  type-only and erased at runtime (decision `0004`). **23 biomes, 185 transition rules**, six
+  cycle kinds, five named presets. What a world can do now:
+  - **Land and water are two-way traffic.** Lava reaching the sea builds new land
+    (`shallows → basalt`); shallows cut off from the sea bake dry (`shallows → desert`). Both
+    are gated on *geometry*, never on heat alone, because a heat-gated evaporation edge closes
+    a feedback loop whose gain is greater than one. Decisions `0012`–`0014`.
+  - **Rivers, as an area and a 23rd biome.** They spring from marsh, chain downhill on a
+    retained elevation field, and warm to swamp. A river is **land**, not sea — the flag that
+    makes that true is load-bearing (decision `0019`). Decisions `0018`–`0021`.
+  - **Weather systems that travel, morph and die.** Six flags (rain / heavy rain / wind /
+    heavy wind / cloud / heavy cloud), storms on their own sinusoidal tracks that change
+    character against the ground they cross and die on stone. `garden` and `crucible` carry
+    weather. It buys legibility, not disturbance, and spends nothing from the water budget.
+    Decisions `0015`–`0017`.
+  - **A travelling sun.** The beam is a swept hex disc on a sinusoid rather than a full-height
+    wall, so **coverage** is a parameter where it used to be pinned at 100%. `radiusHexes` is a
+    first-class GM knob with a measured table behind it (below). `shape: 'band'` is kept and
+    scoped, not deleted. Decisions `0007`, `0008`.
+  - **A sea whose temperature reaches inland.** Per-tile stored temperature with thermal
+    inertia, a per-day BFS proximity field with distance falloff, and seasons moved onto a
+    separate ambient channel so an acute purge is not low-passed into nothing. Decisions
+    `0009`–`0011`.
 - **`src/viewer/`** — a local world viewer: the hex map on a canvas, play/pause/step,
   hover readout, live liveness metrics, and a **cycle composer** — assemble any set of
   cycles (including two of the same kind out of phase), read what each one does to a world,
@@ -86,37 +110,79 @@ devDependencies. The simulator and viewer run from a bare checkout.
   ```
   npm run viewer -- --width 320 --height 192 --seed 7 --cycles garden
   ```
-- **`src/sim/`** — headless terrain simulator. TypeScript, runs natively on Node 24, **zero
-  runtime dependencies, no build step.** `typescript` and `@types/node` are devDependencies,
-  type-only and erased at runtime (decision `0004`).
 
-### Validated — 2026-07-29, re-measured after the rule re-key
-Rolls used to be keyed on a rule's position in the `RULES` array, so **every world changed
-when that was fixed** and every previously recorded figure was invalidated. Nothing below
-is carried forward; all of it comes from runs made after the fix. 240 × 144, seed 20260729:
+### Validated — 2026-07-30, re-measured in one pass after epic `2915cb06`
+Five sequential specs each moved the world and each re-baselined the golden hashes, and none
+of them was allowed to touch this file. **Nothing below is carried forward from any of them;
+all of it comes from runs made on the final tree, in one pass.** That discipline is not
+optional pedantry — this epic produced *three* separate defects from numbers surviving across
+trees, one of which reached GM-facing text (`SIMULATION.md` bug #16). 240 × 144, seed
+20260729, unless stated.
 
 - `npm run typecheck` — **clean.** ⚠️ Read this one honestly: the first `tsc --noEmit` reported
   94 errors and **every one was a missing Node host global**, so there were **zero substantive
   type errors** and nothing was fixed — a host environment was configured (`@types/node`).
-  **The gate found nothing today; its entire value is prospective**, catching the next
-  silently-dead flag rather than having caught this one.
-- `npm run sim:check` — **all invariants hold.** 160 rules with 160 unique keys and 160
-  distinct roll streams, single strongly connected component across 22 biomes, all 160
-  rules satisfiable, every biome escapable without cycles, 10 required chemistry edges.
-- `npm run sim:golden` — **2 golden worlds unchanged**, each verified deterministic across
-  two independent builds.
-- `node src/sim/run.ts --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.753,
-  churn 3.92%, largest biome 18.2%, 14 biomes above 1%; 82 habitable regions, 0 generic and
-  0 thin, median 18 materials.
+  **The gate found nothing on the day it was added; its entire value is prospective.**
+- `npm run sim:check` — **all invariants hold.** 23 biomes, 185 rules with 185 unique keys and
+  185 distinct roll streams, a single strongly connected component over all 23 biomes (148
+  edges, 29.2% density), all 185 rules satisfiable, every biome escapable without cycles, 10
+  required chemistry edges, no latched biome family on any live preset, and 1.000
+  evaluations/column/day at all ten width × band combinations.
+- `npm run sim:golden` — **2 golden worlds unchanged**, each verified deterministic across two
+  independent builds: `still` `10468117cccd7501`, `crucible` `599d7815137a0a4f`.
+- `node src/sim/run.ts --days 1500 --cycles crucible` — **both tests pass.** Entropy 0.772,
+  churn 3.65%, largest biome Deep Ocean 17.7%, 15 biomes above 1%; 83 habitable regions,
+  0 generic and 0 thin, median 18 materials.
 - `node src/sim/run.ts --days 1500 --cycles still` — **the control correctly FAILS**
-  (entropy 0.647, churn 0.04%, 12 generic and 16 thin regions, flagged as heat death).
+  (entropy 0.637, churn 0.05%, 15 generic and 19 thin regions, flagged as heat death).
   This is the important one: it proves the test discriminates.
-- `npm run sim` (1200 days, `crucible`) — **both tests pass.** Entropy 0.749, churn 3.58%,
-  largest biome 17.0%, 13 biomes above 1%.
+- The other three presets at 1500 days all pass both tests: `kiln` 0.755 / 3.25%, `anvil`
+  0.728 / 1.51%, `garden` 0.723 / 3.17%.
+- `npm run sim:sweep` — **the coastline is a two-way membrane on every cycle set**, inside
+  ±5 pp over 40 game-years. Sea share y0 → y40: `still` 23.8 → 22.2%, `anvil` 23.8 → 25.2%,
+  `garden` 23.8 → 22.0%, `kiln` 23.8 → 22.0%, `crucible` 23.8 → 26.3%. Corrected churn column:
+  `still` 0.05%, `anvil` 1.27%, `garden` 2.35%, `kiln` 2.55%, `crucible` 2.95% — a **63×** spread
+  between the control and the fullest cycle set. **Read the caveat in `SIMULATION.md`**: the
+  membrane has no restoring force, and that one is recorded, not fixed.
 
-The re-key moved the numbers in the third decimal place and moved **no verdict** — the
-findings were properties of the ruleset, not of its array order. Full numbers and the
-before/after hash comparison in `SIMULATION.md`.
+  The documentation pass that produced this section also found the sweep dividing its churn
+  delta by the wrong interval — the control was reading 12× its true churn and **spuriously
+  clearing the sweep's own frozen-world test**. Fixed in `0b664b2`; no shipped verdict moved,
+  because `npm run sim` computes churn by a different and correct path.
+
+Full numbers, the argument behind each, and the bug list are in `SIMULATION.md`.
+
+### ⚠️ Test-1 thresholds were recalibrated — know why, and know what just moved
+Entropy stopped separating living worlds from dead ones once the taxonomy grew. *(Historical
+measurement, from the ruleset as it stood before the recalibration and not re-run since:* a
+no-disturbance control measured entropy **0.707** against a fully-cycled world's **0.703**, so
+the *frozen* world scored **higher** and both were reported alive. *That was taken when the
+taxonomy held 22 biomes; it holds 23 today.)*
+
+**Churn is the load-bearing metric.** Variety is a snapshot property; being alive is a property
+of motion. Do not "simplify" Test 1 back to entropy alone.
+
+**The margin moved this epic, and the reason matters more than the number.** `biomeEntropy()`
+divides by `ln(BIOME_COUNT)`, so the 23rd biome rescaled *every entropy figure ever recorded*
+by 0.985823. Measured today, the control fails entropy by **0.0133** (0.637 against 0.65), and
+**all of that widening is arithmetic**: the same composition under the old divisor scores
+0.6459 and **fails too**, by 0.0041.
+
+⚠️ **The denominator widened a failure that was already there — it did not create one.** That
+is provable, not argued: `still` holds no river tiles at all, and its golden hash has been
+`10468117cccd7501` since spec 2, unchanged by specs 3, 4 and 5. The control's world is the same
+world; only the divisor moved. The often-repeated pre-epic margin of "0.003" is **not** quoted
+here, because it was taken on a tree whose control has since changed and the figures recorded
+mid-epic used a 1200-day horizon rather than 1500 — comparing them would be the defect in
+`SIMULATION.md` bug #16, which this epic committed four times.
+
+That is the real argument for R-005, and it is a stronger one than it replaces: **entropy's
+safety margin is a function of the taxonomy's size, which has nothing to do with liveness.**
+Churn is a total-variation distance, bounded 0…1, and does not move when a biome is added.
+Today the control fails entropy by 2.0% of its threshold and churn by 66% of its threshold —
+churn's margin is thirty times wider, and it is the one that will still mean the same thing
+after the 24th biome. `ALIVE_ENTROPY` was **not** changed; moving a liveness threshold is an
+escalation, not a documentation edit.
 
 ### Fixed
 **Transition rolls were keyed on array position.** `rollAt(seed, tile, day, r)` used the
@@ -127,7 +193,8 @@ nothing reported it. Rule identity is now derived from content. Decision `0002`.
 **`npm run sim --days N` ran a different world than it claimed.** npm swallows flags that
 aren't after `--`, and the `sim` script hard-coded `--days 1200` which won anyway on
 `indexOf`. `npm run sim --days 1500 --cycles still` actually ran *crucible at 1200 days* —
-and that exact command was documented here as the evidence for the control failing. Fixed.
+and that exact command was documented here as the evidence for the control failing. Fixed;
+`run.ts` now resolves flags with `lastIndexOf`, so a repeated flag takes the last occurrence.
 
 **Dead CLI flags in `run.ts`.** `--beam-period` was parsed into a property
 `WorldOptions` no longer declared; Node strips types unchecked, so it silently did
@@ -136,28 +203,68 @@ parsed. (The older recorded numbers were correct *by luck* — the ignored flags
 constructor defaults applied, which happened to match the config being claimed.)
 `npm run typecheck` now exists so this class of bug is caught rather than discovered.
 
-### ⚠️ Test-1 thresholds were recalibrated — know why
-At ~22 biomes, entropy stopped separating living worlds from dead ones. *(Historical
-measurement, from the ruleset as it stood before the recalibration and not re-run since:* a
-no-disturbance control measured entropy **0.707** against a fully-cycled world's **0.703**,
-so the *frozen* world scored **higher** and both were reported alive.*)*
+---
 
-**Churn is now the load-bearing metric.** Variety is a snapshot property; being alive is a
-property of motion. Do not "simplify" Test 1 back to entropy alone.
+## ⚠️ Two decisions waiting on you
 
-The current margins say the same thing, measured today: the control fails on entropy by
-0.003 (0.647 vs a 0.65 threshold) and on churn by a factor of **four** (0.04% vs 0.15%).
-Entropy is still the metric that nearly lets a corpse through.
+Neither is a defect. Both are choices deliberately left open rather than settled by whoever
+happened to be editing the code.
+
+### 1. The beam radius default is a placeholder, not a validated result
+
+You asked to set the beam's size per world and declined to pick one. **The shipped default of
+`radiusHexes: 16` is the orchestrator's choice, not yours** — it was selected to reproduce the
+previously validated worlds' verdicts, not because it is the right severity for anything.
+
+The table exists so the choice can be made from evidence. `anvil` (beam only), 240 × 144,
+1200 days, seed 20260729, track held fixed so radius is the only variable:
+
+| radius | coverage % | entropy | churn % | `npm run sim` says | `npm run sim:check` says |
+|---|---|---|---|---|---|
+| 2 | 28.46 | 0.676 | 0.180 | **alive** | ✗ **61.56% has no live exit — 6 families latched** |
+| 4 | 55.98 | 0.699 | 0.327 | **alive** | ✗ **34.16% — 4 families latched** |
+| **8** | 93.34 | 0.722 | 0.644 | alive | ✓ 15.78% |
+| 12 | 100.00 | 0.731 | 0.937 | alive | ✓ 13.88% |
+| **16** *(shipped)* | 100.00 | 0.730 | 1.197 | alive | ✓ 13.54% |
+| 24 | 100.00 | 0.730 | 1.620 | alive | ✓ 13.45% |
+| 32 | 100.00 | 0.728 | 1.926 | alive | ✓ 13.09% |
+
+**Below radius ≈8 the world latches, and `npm run sim` does not notice.** That is the row that
+should decide the number: coverage saturates between r=8 and r=12, and past saturation radius
+buys only heat — r=12 → r=32 quadruples the dose per purge and does not improve escapability at
+all. A radius below 8 produces a world that reports itself alive while most of it can never
+change again. **`npm run sim:check`, not `npm run sim`, is what catches that** — see
+`SIMULATION.md` bug #9, which is the general lesson: a merge gate can be weaker than it looks.
+
+### 2. `viewer/limits.ts`'s `MAX_TILES` bound is now questionable
+
+The viewer's cap is 262,144 tiles, and what bounds it is step time. Re-measured on the final
+tree (5-day warm-up, mean of 20 days, median of 3 reps):
+
+| world | tiles | `still` | `crucible` (six cycles) |
+|---|---|---|---|
+| 240 × 144 | 34,560 | 4.6 ms/day | 8.0 ms/day |
+| 512 × 512 | 262,144 | 38.7 ms/day | **74.9 ms/day** |
+
+`ViewerSession.schedule` delivers speeds above 20 days/second as several days per timer tick,
+so at the top speed of 60 it steps 3 days in one synchronous block: **~225 ms of blocked event
+loop per tick at the cap with six cycles.** That is past "feels live", not at the edge of it. A
+GM who builds a 512 × 512 `crucible` world and plays it at 60 days/second will see playback
+stall.
+
+Spec `2915cb06-5` corrected the stale comment that justified the bound and **deliberately left
+the bound alone**, because lowering `MAX_TILES` is a product decision — it decides how large a
+world a GM may build at all, not merely how smoothly it plays. It is yours to make.
 
 ---
 
-## The three findings that shape everything
+## The four findings that shape everything
 
 **1. Disturbance is what keeps a world alive.** A world with no cycles converges to a
-static equilibrium — measured churn **0.04%** against a fully-cycled world's **3.92%**,
-roughly two orders of magnitude, with 92.4% of the control's tiles holding no live
-out-rule at all across a watched game-year. The god's reshaping is not flavour on top of a
-living world; it is the mechanism that makes it live.
+static equilibrium — measured churn **0.05%** against a fully-cycled world's **3.65%**, a
+factor of **72**, with 92.4% of the control's tiles holding no live out-rule at all across a
+watched game-year. The god's reshaping is not flavour on top of a living world; it is the
+mechanism that makes it live.
 
 **2. Exponential progression and a player economy are incompatible.** If power multiplies,
 early materials become worthless and the market collapses to a thin band of the current
@@ -171,11 +278,10 @@ it *is* the supply side.
 
 **4. A world's cycle set determines which biomes can exist in it — and therefore which
 materials.** Measured, not theorised: with no tectonics the transition graph has no path
-to `mountain` at all; with no volcanism and no beam, `lava`, `ash`, `basalt` and fertile
-`soil` are unreachable. A no-cycle world fragments into 6 disconnected components covering
-17 of 22 biomes; the full-cycle presets form a single component covering all 22. **The
-GM's difficulty dial reaches all the way into the economy** — a garden world has no
-volcanic stone and must trade for it.
+to `mountain` at all; with no volcanism and no beam, `lava` and `ash` are unreachable. A
+no-cycle world fragments into 4 disconnected components covering 20 of 23 biomes; `kiln` and
+`crucible` each form a single component covering all 23. **The GM's difficulty dial reaches
+all the way into the economy** — a garden world has no volcanic stone and must trade for it.
 
 ---
 
@@ -189,8 +295,28 @@ Full lists live per-session in `BRAINSTORM.md`; these are the ones that block wo
 3. **Does armor need an anti-stalemate rule?** Currently stalemates are accepted as fine.
 4. **How do levels/stats stay breadth-not-power?** They drift toward multipliers unless
    watched, and multipliers break pillar #2 above.
-5. **Rivers** — an edge feature, not an area. Currently modelled as ground subsiding into
-   shallows, which is a stand-in, not a river layer.
+5. **Does the coastline need a restoring force?** The membrane is two-way, but only because
+   two large opposed flows nearly cancel — on a live world the net is **4–15% of the gross**,
+   and nothing pulls the sea back towards where it started. Every new water↔land edge is
+   therefore a pure ratchet spending from a few points of headroom. Related: the ±5 pp /
+   40-game-year test cannot tell "converged" from "draining forever" — `kiln` passes it
+   comfortably while its post-transient rate projects to 15% sea at year 200.
+
+### Answered: rivers are an area, not an edge
+
+*Previously open question #5 — "an edge feature, not an area; currently modelled as ground
+subsiding into shallows, which is a stand-in, not a river layer."* **Settled the other way, on
+measurement.** Rivers are a 23rd biome occupying whole tiles, springing from marsh and chaining
+downhill against a retained elevation field. Two results decided it:
+
+- **Only elevation bounds the growth.** River spreading is a directed branching process: with
+  a downhill gate it settles at ~1.9% of the world; without one it reached 24.9% and was still
+  climbing.
+- **A river must be `water: false`.** Counting it as water annihilated the biome (1.14% →
+  0.00%) *and* opened a +1.5 pp water ratchet in four game-years — two failures from one flag.
+
+Measured on `crucible`'s tail, river holds **5.14%** of the world. Decisions `0018`–`0021`; the
+sublattice trap that nearly shipped underneath a misleading render is `SIMULATION.md` bug #14.
 
 ---
 
@@ -199,5 +325,6 @@ Full lists live per-session in `BRAINSTORM.md`; these are the ones that block wo
 - Design decisions get written into `BRAINSTORM.md` **with the reasoning**, including
   corrections — superseded reasoning is marked, not deleted, so the record explains why
   the current answer is the current answer.
-- Claims about the sim get **numbers from an actual run**, not estimates.
+- Claims about the sim get **numbers from an actual run**, not estimates — and from a run made
+  on *the tree the claim is committed with*, not a plausible earlier one.
 - When something fails, it gets reported as failing.

@@ -102,7 +102,7 @@ function resizeCanvas() {
 const FILL_CHUNK = 16;
 
 /**
- * Draw a set of tiles, bucketed by biome so `fillStyle` is set 22 times per frame
+ * Draw a set of tiles, bucketed by biome so `fillStyle` is set once per biome present (23 at most) per frame
  * instead of once per tile, and flushed every FILL_CHUNK hexes so the rasteriser never
  * sees a path large enough to choke on.
  */
@@ -529,8 +529,20 @@ function paramRow(inst, index, def) {
 
   input.addEventListener('input', () => {
     formDirty = true;
-    if (def.type === 'boolean') inst.values[def.name] = input.checked;
-    else inst.values[def.name] = Number(input.value);
+    if (def.type === 'boolean') {
+      inst.values[def.name] = input.checked;
+    } else if (def.type === 'choice') {
+      // ★ NOT `Number(...)`. A choice may be a string — the beam's `shape` is `band` or
+      // `blob` — and coercing one gives NaN, which the server rejects and which the
+      // person cannot see in the select they just used. Matching back against the
+      // catalogue's own list restores the ORIGINAL type, so numeric choices such as
+      // direction stay numbers and string choices stay strings, with no per-parameter
+      // special case here.
+      const picked = def.choices.find((c) => String(c) === input.value);
+      inst.values[def.name] = picked !== undefined ? picked : Number(input.value);
+    } else {
+      inst.values[def.name] = Number(input.value);
+    }
     row.classList.toggle('changed', inst.values[def.name] !== def.default);
     paintCost();
   });
@@ -699,11 +711,16 @@ const KIB = (bytes) => `${(bytes / 1024).toFixed(0)} KiB`;
  * What the current world costs, and what the pending one would.
  *
  * The projection scales the world's own MEASURED ms/day by tile count, which is sound
- * because the simulation is linear in tiles — measured 92 ns/tile with no cycles and
- * 125 ns/tile with all five, flat from 2,048 to 864,000 tiles. It does not attempt to
- * price adding a cycle, because that depends on which cycle: a dormant beam costs
- * nothing at all, since a cycle whose `dayState` returns null is dropped from the
- * per-tile loop entirely.
+ * because the simulation is linear in tiles — ~125-175 ns/tile with no cycles and
+ * ~216-306 ns/tile with all six cycle kinds, roughly flat from 34,560 tiles (240×144) up
+ * to the 262,144-tile cap. Those are the re-measured figures behind `MAX_TILES`; the table
+ * they come from, with the per-size ms/day it was fitted to, is in `src/viewer/limits.ts`.
+ * The old pair quoted here (92 / 125 ns/tile, over a tile range that now runs past the
+ * cap) predated the weather cycle, the stored thermal filter and the river ring.
+ *
+ * It does not attempt to price ADDING a cycle, because that depends on which cycle: a
+ * dormant beam costs nothing at all, since a cycle whose `dayState` returns null is
+ * dropped from the per-tile loop entirely.
  */
 function paintCost() {
   if (status === null) return;
@@ -770,8 +787,10 @@ function paintReach() {
     el.innerHTML =
       `sweeping the ruleset${p && p.total ? ` · ${p.done}/${p.total} rules` : ''}` +
       '<p class="caveat">A restricted world is the slow case: a rule that CANNOT fire has ' +
-      'to be ruled out across every probe. Measured 0.2 s for all five kinds, 4.7 s for ' +
-      'none, 30.8 s for seasons + monsoon + tectonics. Cached once done.</p>';
+      'to be ruled out across every probe. Measured over the 185-rule set — about 1 s for ' +
+      'all six cycle kinds, 6 s for none, 35 s for seasons + monsoon + tectonics. It is ' +
+      'the ruleset being swept, not your map, so the wait does not grow with world size; ' +
+      'the seconds are from one machine and yours may differ. Cached once done.</p>';
     return;
   }
 

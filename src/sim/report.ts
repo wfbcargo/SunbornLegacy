@@ -246,7 +246,7 @@ export const THIN_BELOW = 6;
  * Accumulates region composition across many days, so the niche test measures what a
  * region RELIABLY produces rather than what it happened to look like on one day.
  *
- * This matters more at 22 biomes than it did at 12, and for the same reason
+ * This matters more at 23 biomes than it did at 12, and for the same reason
  * SIMULATION.md's fifth bug mattered: a purged world oscillates, so a single end-of-run
  * snapshot lands at an arbitrary phase of the cycle. Measured on the last day of a
  * crucible run — which is a day or two after a beam pass — marsh held 4.2% of the

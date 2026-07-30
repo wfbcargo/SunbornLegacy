@@ -22,11 +22,34 @@ import {
   SCORCHING, WARM, WET, type TileContext,
 } from './biomes.ts';
 import {
-  CycleEffect, CycleFlag, SolarBeam, makeCycle,
-  type CycleForecast, type CycleSpec, type WorldCycle,
+  CycleEffect, CycleFlag, SolarBeam, TerrainClass, makeCycle,
+  type CycleForecast, type CycleSpec, type WorldCycle, type WorldView,
 } from './cycles.ts';
 
 export const TICKS_PER_DAY = 14_400;
+
+/**
+ * `TerrainClass` bits per biome id — the taxonomy `WorldView.terrainAt` hands a
+ * world-reading cycle.
+ *
+ * ★ DERIVED FROM `BiomeDef` PREDICATES, NEVER HAND-ENUMERATED, for the same reason
+ * `SEA`, `DROWNABLE` and `FREEZABLE` are: a hand-written list of "which ids count as
+ * sea" is a biome that silently stops being sea the day someone adds one. It lives here
+ * rather than in `cycles.ts` because `biomes.ts` already imports `CycleFlag`, and a
+ * cycle between those two files would be a module-evaluation-order hazard rather than a
+ * design. Decision `0015`.
+ */
+const TERRAIN_CLASS: Uint8Array = (() => {
+  const table = new Uint8Array(BIOME_COUNT);
+  for (const def of BIOMES) {
+    let bits = 0;
+    if (def.water && !def.molten) bits |= TerrainClass.Sea;
+    if (def.molten) bits |= TerrainClass.Molten;
+    if (def.stone) bits |= TerrainClass.Stone;
+    table[def.id] = bits;
+  }
+  return table;
+})();
 
 /**
  * Default columns evaluated per sweep step.
@@ -36,6 +59,53 @@ export const TICKS_PER_DAY = 14_400;
  * band that wraps — see `step()`. Any width ages evenly; decision `0006`.
  */
 export const DEFAULT_BAND_WIDTH = 8;
+
+// ---------------------------------------------------------------------------
+// The thermal filter — stored temperature, water coupling, distance falloff
+// ---------------------------------------------------------------------------
+
+/**
+ * Relaxation rate per visit (= per day) for LAND.
+ *
+ * A tile's heat used to be a pure function of its neighbourhood, recomputed on every
+ * visit, so "the temperature changes more slowly near water" had nothing to slow down.
+ * `temperature` is that missing state and these are its time constants: land settles in
+ * a handful of days, the sea takes a season.
+ */
+export const THERMAL_ALPHA_LAND = 0.5;
+/**
+ * Relaxation rate per visit for TRUE WATER (`water && !molten`).
+ *
+ * 0.023 is a ~43-day time constant, which against the 360-day year puts the sea's
+ * seasonal peak ~37 days behind the land's at ~80% of its amplitude. That lag IS the
+ * feature: the anomaly it creates is what the coupling below carries inland.
+ */
+export const THERMAL_ALPHA_WATER = 0.023;
+
+/**
+ * Coupling weight at the shoreline. `w(d) = WATER_COUPLING * exp(-(d-1)/WATER_COUPLING_FOLD)`,
+ * zero beyond `WATER_REACH`, and 0 on water itself.
+ *
+ * ★ THIS NUMBER IS SPENT OUT OF INVARIANT 8's HEADROOM, and the trade is close to
+ * linear — see the spec's table. It is not a free "more maritime climate" dial.
+ */
+export const WATER_COUPLING = 0.6;
+/** e-folding distance of the falloff, in hexes. */
+export const WATER_COUPLING_FOLD = 2;
+/** Hexes the water field is propagated. Beyond this a tile is inland, full stop. */
+export const WATER_REACH = 6;
+
+/** `w(d)`, precomputed. Index 0 is water itself and is deliberately 0. */
+const COUPLING_WEIGHT = (() => {
+  const w = new Float64Array(WATER_REACH + 1);
+  for (let d = 1; d <= WATER_REACH; d++) {
+    w[d] = WATER_COUPLING * Math.exp(-(d - 1) / WATER_COUPLING_FOLD);
+  }
+  return w;
+})();
+
+/** Sentinel in `waterDist` for "further from water than WATER_REACH". */
+const NO_WATER = 255;
 
 export interface WorldOptions {
   width: number;
@@ -77,9 +147,50 @@ export class World {
 
   readonly biome: Uint8Array;
   readonly moisture: Float32Array;
+  /**
+   * Stored temperature — the state the thermal filter relaxes. This is what a rule
+   * reads as `TileContext.heat` (plus any ACUTE cycle heat, which bypasses the filter).
+   */
+  readonly temperature: Float32Array;
+  /**
+   * The equilibrium heat `H` as of each tile's last visit.
+   *
+   * Stored rather than recomputed for one reason: the water field below needs a water
+   * tile's thermal ANOMALY (`T - H`), and recomputing `heatAt` for every water tile
+   * during the daily field refresh would be a second neighbour gather over the whole
+   * sea. Being one visit stale is correct as well as cheap — the field is resolved at
+   * the START of the day, so every land tile reads the same snapshot whatever order the
+   * sweep reaches them in.
+   */
+  readonly heatBase: Float32Array;
+  /**
+   * Worldgen elevation, 0..1. WRITTEN ONCE IN `generate()` AND NEVER AGAIN.
+   *
+   * ★ WHY IT HAS TO BE STORED AT ALL. It looks recoverable from `heatOffset`, and it is
+   * not: that term is `-34 * max(0, elev - 0.5) + (rough - 0.5) * 10`, which is FLAT for
+   * every tile below 0.5 and contaminated by an independent roughness field above it. Half
+   * the world would read as one elevation and the other half would read as elevation plus
+   * noise — and the downhill gate would then be a random gate, which is the one thing that
+   * is worse than no gate (see `TileContext.upstreamRiverNeighbours`). 4 bytes/tile: 138 KiB
+   * at 240×144, 983 KiB at the viewer's 640×384 ceiling.
+   *
+   * ★ AND WHY IT IS STATIC. Subsidence and orogeny move the BIOME, never the height —
+   * `ground subsides` writes Shallows onto a tile whose elevation is unchanged. A mutable
+   * elevation field feeding `heatOffset` would be a neighbour-blind, spatially broad,
+   * self-reinforcing heat term: the albedo runaway that sterilised a world (bug #4), with a
+   * longer fuse and no cap. Nothing in the stepping path writes here. Decision `0018`.
+   */
+  readonly elevation: Float32Array;
   /** Static per-tile climate offsets from worldgen (elevation, prevailing damp). */
   private readonly heatOffset: Float32Array;
   private readonly moistOffset: Float32Array;
+
+  /** Hexes to the nearest true water, or `NO_WATER`. Refreshed once a day. */
+  private readonly waterDist: Uint8Array;
+  /** Mean thermal anomaly of the water reaching this tile. Refreshed once a day. */
+  private readonly waterAnomaly: Float32Array;
+  /** BFS frontier for the water field. Every tile is enqueued at most once. */
+  private readonly fieldQueue: Int32Array;
 
   private readonly bandWidth: number;
 
@@ -95,6 +206,8 @@ export class World {
   private cycleStatesDay = -1;
   /** Reused per tile. Cycles only ever accumulate into it; no allocation on the loop. */
   private readonly effect = new CycleEffect();
+  /** This world as a read-only window, handed to every `dayState`. */
+  private readonly worldView: WorldView;
 
   /** Leading column of the sun's gaze. */
   private gaze = 0;
@@ -114,6 +227,12 @@ export class World {
       (opts.beam
         ? [{
             kind: 'solarbeam' as const,
+            // ★ EXPLICITLY `band`. These options are sugar for the ORIGINAL beam, and
+            // `beamWidth` is a band width in columns — a knob a blob does not have. The
+            // sweep and diagnose harnesses and every number they recorded were taken
+            // with a band, so the sugar keeps meaning what it meant even though the
+            // catalogue default is now a blob.
+            shape: 'band' as const,
             transitDays: opts.beamTransitDays ?? 60,
             cycleDays: opts.beamCycleDays ?? 360,
             widthCols: opts.beamWidth ?? 8,
@@ -123,15 +242,86 @@ export class World {
       (typeof (s as WorldCycle).dayState === 'function' ? (s as WorldCycle) : makeCycle(s as CycleSpec))
         .bind(opts.width, opts.height, opts.seed),
     );
-    this.refreshCycles(0);
-
     const n = this.grid.size;
     this.biome = new Uint8Array(n);
     this.moisture = new Float32Array(n);
+    this.temperature = new Float32Array(n);
+    this.heatBase = new Float32Array(n);
+    this.elevation = new Float32Array(n);
     this.heatOffset = new Float32Array(n);
     this.moistOffset = new Float32Array(n);
+    this.waterDist = new Uint8Array(n);
+    this.waterAnomaly = new Float32Array(n);
+    this.fieldQueue = new Int32Array(n);
 
     this.generate(opts.seaLevel ?? 0.44);
+    this.seedTemperature();
+
+    // A plain object rather than `this` on purpose: handing a cycle the `World` would
+    // hand it `stepDay`, `biome` and the hydrology, and a cycle that can step the world
+    // is a cycle that can recurse into itself. Four members is the whole affordance.
+    // Built here, not as a field initializer, because field initializers run before the
+    // constructor body and `this.grid` does not exist yet at that point.
+    this.worldView = {
+      width: this.grid.width,
+      height: this.grid.height,
+      biomeAt: (col, row) => this.biome[this.grid.index(col, row)]!,
+      moistureAt: (col, row) => this.moisture[this.grid.index(col, row)]!,
+      terrainAt: (col, row) => TERRAIN_CLASS[this.biome[this.grid.index(col, row)]!]!,
+    };
+
+    // ★ AFTER `generate`, NOT BEFORE. This used to be the first thing the constructor
+    // did, which was invisible only for as long as no cycle read the world: `dayState`
+    // was handed a `WorldView` over a `biome` array that did not exist yet, so a
+    // world-reading cycle either threw during construction or — worse — guarded itself
+    // and silently resolved day 0 against nothing. Moving it costs nothing and was
+    // verified behaviour-preserving: both golden hashes are unchanged by the move alone.
+    //
+    // ★ AND IT MUST STAY THE ONLY THING HERE THAT TOUCHES A CYCLE. `refreshCycles` calls
+    // `dayState` once per cycle; it must never grow into a call to `affect`, which is
+    // per TILE. `invariants.ts` §9 counts `affect` calls to measure the sweep and asserts
+    // the constructor makes zero — a day-0 pass that called `affect` on every tile would
+    // read as a whole extra sweep and turn that check red for a reason unrelated to it.
+    // That is why `seedTemperature` above resolves `heatAt` with no cycle contribution
+    // rather than by building a real `TileContext`.
+    this.refreshCycles(0);
+    this.refreshWaterField();
+  }
+
+  /**
+   * Day-0 temperature: every tile starts at its own GEOGRAPHIC equilibrium.
+   *
+   * Load-bearing, and the choice of "geographic" over "today's equilibrium" is the
+   * whole point. Cycle heat is excluded deliberately — day 0 is the seasonal peak
+   * (`cos 0 = 1`), and seeding a 43-day filter at the summer maximum is seeding it with
+   * a whole season of error that then takes hundreds of days to leak out. The annual
+   * mean of the ambient channel is zero, so the cycle-free equilibrium IS the correct
+   * initial condition for the slow water filter, and land relaxes out of any residual
+   * within a handful of days at alpha 0.5.
+   *
+   * Same discipline as the moisture seed in `generate`: day 0 must already be a
+   * consistent state, not a state the first hundred days are spent recovering from.
+   */
+  private seedTemperature(): void {
+    const { grid, biome, temperature, heatBase } = this;
+    const counts = new Int32Array(BIOME_COUNT);
+    for (let i = 0; i < grid.size; i++) {
+      counts.fill(0);
+      let openWater = 0;
+      let ice = 0;
+      for (let d = 0; d < 6; d++) {
+        const nb = biome[grid.neighbourAt(i, d)]! as Biome;
+        counts[nb]!++;
+        const def = BIOMES[nb]!;
+        if (def.water && !def.molten) {
+          if (nb === Biome.FrozenSea) ice++;
+          else openWater++;
+        }
+      }
+      const h = this.heatAt(i, biome[i]! as Biome, counts, openWater, ice, 0);
+      temperature[i] = h;
+      heatBase[i] = h;
+    }
   }
 
   get day(): number {
@@ -155,12 +345,21 @@ export class World {
   }
 
   /**
-   * `cycleHeat` is the summed contribution of every active cycle for this tile today.
-   * It replaces the old hardcoded `if (underBeam) heat += 70`, which is now the
-   * SolarBeam cycle's own parameter. Cycle heat is deliberately a separate term from
-   * albedo: albedo is a FEEDBACK (desert heats its neighbours, which makes more
-   * desert) and is capped at 1.2 for that reason, whereas cycle heat is externally
-   * scheduled and cannot amplify itself, so it can be large and transient.
+   * The tile's EQUILIBRIUM heat `H` — what its temperature is relaxing towards, not
+   * what a rule reads. `TileContext.heat` is the filtered temperature plus acute cycle
+   * heat; see `buildContext`.
+   *
+   * `ambientHeat` is the summed SLOW contribution of every active cycle for this tile
+   * today — seasons, and anything else that is a months-long forcing. It replaces the
+   * old hardcoded `if (underBeam) heat += 70`, which is now the SolarBeam cycle's own
+   * parameter, and the beam no longer comes through here at all: acute heat bypasses
+   * the filter entirely, because low-passing a one-day +115 impulse against a melt gate
+   * of 120 does not soften the melt chemistry, it deletes it.
+   *
+   * Cycle heat is deliberately a separate term from albedo: albedo is a FEEDBACK
+   * (desert heats its neighbours, which makes more desert) and is capped at 1.2 for
+   * that reason, whereas cycle heat is externally scheduled and cannot amplify itself,
+   * so it can be large and transient.
    *
    * ★ EVERY NEIGHBOUR-DEPENDENT TERM HERE IS A FEEDBACK LOOP AND MUST BE TINY.
    * That is the lesson of bug #4 (albedo at +2.5 sterilised the world in one purge)
@@ -175,7 +374,7 @@ export class World {
     counts: Int32Array,
     openWaterNeighbours: number,
     iceNeighbours: number,
-    cycleHeat: number,
+    ambientHeat: number,
   ): number {
     let heat = 50 + this.latitudeHeat(this.grid.row(index)) + this.heatOffset[index]!;
 
@@ -206,7 +405,7 @@ export class World {
     // sea deliberately carry none — see BiomeDef.selfHeat.
     heat += BIOMES[current]!.selfHeat;
 
-    return heat + cycleHeat;
+    return heat + ambientHeat;
   }
 
   // -------------------------------------------------------------------------
@@ -225,12 +424,103 @@ export class World {
     this.cycleStates.length = 0;
     this.activeCycles.length = 0;
     for (const cycle of this.cycles) {
-      const state = cycle.dayState(day);
+      const state = cycle.dayState(day, this.worldView);
       if (state === null) continue;
       this.activeCycles.push(cycle);
       this.cycleStates.push(state);
     }
     this.cycleStatesDay = day;
+  }
+
+  /**
+   * Resolve the water-proximity field for one day: one capped multi-source BFS out
+   * from every true-water tile, carrying the sea's thermal ANOMALY inland.
+   *
+   * ★ WHY A FIELD AND NOT NEIGHBOUR DIFFUSION. Diffusing the anomaly between adjacent
+   * tiles was prototyped and it LATCHES. In a spatially uniform region the diffusive
+   * form reduces to `T <- T + alpha*(1-m)*(H-T)`: the coupling weight multiplies the
+   * GLOBAL time constant by `1/(1-m)`, so a coupling strong enough to be felt three
+   * tiles inland slows down every tile on the map by the same factor. Measured on
+   * `garden` at m=0.9: ice annual max fell 36.3 -> 31.3 against ICE_THAW 28, 18.01% of
+   * sea-ice tiles never thawed in a year, and invariant 8 latched at frozensea 2.53% /
+   * forest 2.30% against a 2.00% limit. It is structural, not a tuning miss — in any
+   * nearest-neighbour scheme `reach ~ 0.5*sqrt(alpha*tau)`, so reach and inertia are
+   * the same knob. A field separates them: reach is the BFS cap, inertia is alpha.
+   *
+   * ★ WHY DAILY AND NOT ONCE AT WORLDGEN. A static field is free and wrong. 4.0% of the
+   * tiles inside the maritime band changed their water distance over 260 days on
+   * `crucible`, and this epic exists to make coastlines move considerably more than
+   * that. Measured cost of the refresh at 240x144: 0.26 ms against a 19.67 ms simulated
+   * day, i.e. 1.3%; the per-tile 3-ring gather it replaces cost 5.4%.
+   *
+   * ★ WHY IT IS DETERMINISTIC (R-004). A multi-source BFS is exactly the shape that
+   * violates determinism, so nothing here depends on discovery order. Ring 0 is built
+   * by an ascending index scan. A tile discovered at ring `d` then computes its own
+   * anomaly by gathering ITS neighbours that sit at ring `d-1`, in fixed direction
+   * order 0..5 — a pull, not a push. Ring `d-1` is complete and frozen by then, so the
+   * value written is a function of the biome array and the previous day's state alone,
+   * not of which source happened to reach the tile first. There is no Set, no Map, and
+   * no float sum whose order could vary.
+   */
+  private refreshWaterField(): void {
+    const { grid, biome, temperature, heatBase, waterDist, waterAnomaly, fieldQueue } = this;
+    const n = grid.size;
+
+    waterDist.fill(NO_WATER);
+    let tail = 0;
+    for (let i = 0; i < n; i++) {
+      const def = BIOMES[biome[i]!]!;
+      // TRUE water only, the same test the hydrology uses: lava is `water` so that it
+      // flows, and a lava field must not export a maritime climate.
+      if (!def.water || def.molten) continue;
+      waterDist[i] = 0;
+      // The anomaly is the whole payload. `T - H` is a TRANSIENT: any sustained change
+      // in H moves T by the same amount in steady state and drives this to zero, so the
+      // DC gain from H to a rule's `heat` stays exactly 1 and no existing feedback's
+      // gain changes. The coupling transports lag, never level.
+      waterAnomaly[i] = temperature[i]! - heatBase[i]!;
+      fieldQueue[tail++] = i;
+    }
+
+    let ringStart = 0;
+    for (let d = 1; d <= WATER_REACH; d++) {
+      const ringEnd = tail;
+      if (ringStart === ringEnd) break;
+      for (let q = ringStart; q < ringEnd; q++) {
+        const u = fieldQueue[q]!;
+        for (let k = 0; k < 6; k++) {
+          const v = grid.neighbourAt(u, k);
+          if (waterDist[v] !== NO_WATER) continue;
+          waterDist[v] = d;
+          let sum = 0;
+          let cnt = 0;
+          for (let j = 0; j < 6; j++) {
+            const w = grid.neighbourAt(v, j);
+            if (waterDist[w] === d - 1) {
+              sum += waterAnomaly[w]!;
+              cnt++;
+            }
+          }
+          // cnt >= 1 by construction: `u` itself is at ring d-1.
+          waterAnomaly[v] = sum / cnt;
+          fieldQueue[tail++] = v;
+        }
+      }
+      ringStart = ringEnd;
+    }
+  }
+
+  /**
+   * Everything that is resolved once per day, before the sweep touches a tile.
+   *
+   * The order is not arbitrary: the water field reads `temperature` and `heatBase` as
+   * they stood at the end of yesterday, and the cycle states are what today's tiles
+   * will be evaluated against. Both are snapshots, which is what keeps the day's result
+   * independent of where the gaze happens to be when a question is asked.
+   */
+  private beginDay(day: number): void {
+    this.refreshCycles(day);
+    this.refreshWaterField();
   }
 
   /**
@@ -255,7 +545,7 @@ export class World {
   step(): void {
     const { grid, biome, counts } = this;
     const day = Math.floor(this.day);
-    if (day !== this.cycleStatesDay) this.refreshCycles(day);
+    if (day !== this.cycleStatesDay) this.beginDay(day);
 
     // Columns remaining in this revolution. Always >= 1: gaze is in [0, width).
     const cols = Math.min(this.bandWidth, grid.width - this.gaze);
@@ -290,12 +580,15 @@ export class World {
    * under any climate their world could actually produce, while every rule in the file
    * was individually satisfiable and the graph was a single component.
    *
-   * Note this recomputes moisture rather than reading it: it is a read-only preview of
-   * what `evaluateTile` would see, so calling it never perturbs the simulation.
+   * Note this RELAXES moisture and temperature rather than reading them back: it is a
+   * preview of what `evaluateTile` would see, computed on copies, so calling it never
+   * perturbs the simulation. Reading the stored values instead would report a tile one
+   * day stale, and invariant 8 — which calls this for every tile every third day —
+   * would then be asking about a world the simulator is not running.
    */
   inspect(index: number): TileContext {
     const day = Math.floor(this.day);
-    if (day !== this.cycleStatesDay) this.refreshCycles(day);
+    if (day !== this.cycleStatesDay) this.beginDay(day);
     const counts = new Int32Array(BIOME_COUNT);
     return this.buildContext(index, this.grid.col(index), this.grid.row(index), counts, false);
   }
@@ -309,7 +602,8 @@ export class World {
   }
 
   /**
-   * Gather neighbours, resolve climate, and (when `commit`) relax this tile's moisture.
+   * Gather neighbours, resolve climate, and (when `commit`) relax this tile's
+   * temperature and moisture.
    *
    * Shared by the simulation and by `inspect`, deliberately: a second implementation
    * of the hydrology for the introspection path would drift from the first, and an
@@ -340,7 +634,11 @@ export class World {
     let openWaterNeighbours = 0;
     let iceNeighbours = 0;
     let moistureSum = 0;
+    let riverRing = 0;
+    let upstreamRiverNeighbours = 0;
+    let downhillNeighbours = 0;
 
+    const myElevation = this.elevation[i]!;
     for (let d = 0; d < 6; d++) {
       const nb = this.grid.neighbourAt(i, d);
       const nbBiome = biome[nb]! as Biome;
@@ -349,17 +647,66 @@ export class World {
       // TRUE water only. Lava is water:true so that it flows, but counting it here
       // would let a lava field irrigate and cool the desert around it — the exact
       // opposite of what a lava field does.
+      //
+      // ★ AND RIVER IS NOT WATER, WHICH IS LOAD-BEARING RATHER THAN INCIDENTAL. `SEA` is
+      // derived from `BiomeDef` and this test is `water && !molten`, so a `water: false`
+      // river is STRUCTURALLY excluded from every piece of coastline arithmetic in the
+      // simulator — drowning, deposition, evaporation, subsidence, the maritime thermal
+      // field and `TERRAIN_CLASS.Sea` alike — without any of them naming it. Decision
+      // `0019` records the measured counterfactual. Do not add a river branch here.
       if (def.water && !def.molten) {
         waterNeighbours++;
         if (nbBiome === Biome.FrozenSea) iceNeighbours++;
         else openWaterNeighbours++;
       }
+      // The river ring, in DIRECTION order — `hex.ts` walks the ring cyclically at both
+      // row parities, so bit `d` and bit `(d+1)%6` are 60° apart and `CHANNEL_OK` can read
+      // "widening" off the mask. `>` and not `>=`: a flat pair is not a downhill pair, and
+      // on the smooth fbm field ties are the interior of a basin.
+      const nbElevation = this.elevation[nb]!;
+      if (nbBiome === Biome.River) {
+        riverRing |= 1 << d;
+        if (nbElevation > myElevation) upstreamRiverNeighbours++;
+      }
+      if (nbElevation < myElevation) downhillNeighbours++;
       moistureSum += moisture[nb]!;
     }
 
     const current = biome[i]! as Biome;
     const def = BIOMES[current]!;
-    const heat = this.heatAt(i, current, counts, openWaterNeighbours, iceNeighbours, effect.heat);
+
+    // -- The thermal filter -------------------------------------------------
+    //
+    //   H      = heatAt(...) + ambientHeat        today's equilibrium
+    //   target = H + w(d) * A                     A = anomaly of the water reaching us
+    //   T     += (target - T) * alpha             land 0.5, water 0.023
+    //   heat   = T + effect.heat                  ★ ACUTE cycle heat BYPASSES the filter
+    //
+    // ★ THE LAST LINE IS NOT A SHORTCUT. `Focus` dwell under the blob beam is exactly
+    // one day and carries heat 70 + focusHeat 45 = +115 against `melting`'s
+    // `heat > MOLTEN (120)` gate. At alpha 0.5 a one-day +115 impulse delivers +57.5 and
+    // nothing on the world ever melts again — no lava, so no basalt, no glass, no
+    // fertile soil. Seasons THROUGH the filter is what delivers maritime climate; the
+    // beam through the filter deletes a third of the chemistry. That is what the two
+    // channels on `CycleEffect` are for.
+    const equilibrium = this.heatAt(i, current, counts, openWaterNeighbours, iceNeighbours, effect.ambientHeat);
+
+    // Distance falloff. `waterDist` is 0 on water (which reads nothing — the field is
+    // one-directional, so there is no loop to close) and NO_WATER past the reach.
+    const dist = this.waterDist[i]!;
+    const target = dist === 0 || dist > WATER_REACH
+      ? equilibrium
+      : equilibrium + COUPLING_WEIGHT[dist]! * this.waterAnomaly[i]!;
+
+    // Water is the slow one, and it is what makes the anomaly exist at all.
+    const alpha = def.water && !def.molten ? THERMAL_ALPHA_WATER : THERMAL_ALPHA_LAND;
+    const t = this.temperature[i]!;
+    const nextT = t + (target - t) * alpha;
+    if (commit) {
+      this.temperature[i] = nextT;
+      this.heatBase[i] = equilibrium;
+    }
+    const heat = nextT + effect.heat;
 
     // Hydrology: open water is a saturated source, heat is the sink, and moisture
     // diffuses between them. That gives continents a real interior gradient —
@@ -386,7 +733,12 @@ export class World {
       const neighbourAvg = moistureSum / 6;
       const retention = 0.9998 - Math.max(0, heat - 52) * 0.0006;
       let target = neighbourAvg * Math.max(0.5, retention);
-      target += 2 * (counts[Biome.Marsh]! + counts[Biome.Swamp]!) + this.moistOffset[i]! * 0.05;
+      // Wetland — and now river — neighbours push the diffusion target up. A river is
+      // standing fresh water, so a valley floor beside one is humid; this is the channel
+      // through which the biome is "wet" at all, and it is a LAND-side channel. It moves
+      // moisture, never the coastline.
+      target += 2 * (counts[Biome.Marsh]! + counts[Biome.Swamp]! + counts[Biome.River]!) +
+        this.moistOffset[i]! * 0.05;
       // Cycle moisture enters as an additive push on the diffusion TARGET — the same
       // channel marsh neighbours use — never as a change to the retention constant.
       // Bug #1 (retention 0.9998) and bug #2 (heat is a multiplicative decay, not a
@@ -403,6 +755,9 @@ export class World {
       moisture: wet,
       waterNeighbours,
       neighbourCounts: counts,
+      riverRing,
+      upstreamRiverNeighbours,
+      downhillNeighbours,
       flags: effect.flags,
       underBeam: (effect.flags & CycleFlag.Beam) !== 0,
     };
@@ -455,7 +810,7 @@ export class World {
   forecast(col: number, row: number, horizonDays?: number): CycleForecast[] {
     const out: CycleForecast[] = [];
     for (const cycle of this.cycles) {
-      const f = cycle.forecast(col, row, this.day, horizonDays);
+      const f = cycle.forecast(col, row, this.day, horizonDays, this.worldView);
       if (f !== null) out.push(f);
     }
     return out.sort((a, b) => a.daysUntil - b.daysUntil);
@@ -482,11 +837,32 @@ export class World {
   }
 
   /**
-   * Real days until the beam next reaches a column — the warning a player gets.
-   * Legible in real-world units and safe to expose through the API.
+   * Where the beam is today, or null when dormant or absent.
+   *
+   * ★ A COLUMN IS NO LONGER AN ANSWER. Under the default blob shape the beam is a disc
+   * on a sinusoidal track, so "which column" leaves out the half of the position that
+   * decides whether a tile is under it. `row: -1` is returned for a band beam, which
+   * genuinely occupies every row of its columns — the honest encoding of "all of them".
    */
-  daysUntilBeam(col: number): number {
-    return this.beam?.forecast(col, 0, this.day)?.daysUntil ?? Infinity;
+  beamPosition(): { col: number; row: number } | null {
+    return this.beam?.position(Math.floor(this.day)) ?? null;
+  }
+
+  /**
+   * Real days until the beam next reaches a TILE — the warning a player gets.
+   *
+   * ★ IT TAKES A ROW, and the row is not optional. This used to ask about a column and
+   * hardcode row 0, which was harmless under a band (every row of a column is under it
+   * at once) and badly wrong under a blob: measured on the shipped track at radius 2, the
+   * column-and-row-0 form returned `Infinity` for 172 of 240 columns, because row 0 is
+   * simply not where the track was.
+   *
+   * ★ `Infinity` IS AN ANSWER, not a failure. The blob's track is periodic and retraces
+   * itself every purge, so a tile it misses is missed for the life of the world. Callers
+   * must render "never", not "unknown" and not "soon".
+   */
+  daysUntilBeam(col: number, row: number): number {
+    return this.beam?.forecast(col, row, this.day, undefined, this.worldView)?.daysUntil ?? Infinity;
   }
 
   // -------------------------------------------------------------------------
@@ -508,7 +884,11 @@ export class World {
         const damp = this.fbm(col, row, moistSeed, 4);
         const rough = this.fbm(col, row, roughSeed, 5);
 
-        // Elevation cools, and adds regional variety beyond pure latitude.
+        // The ONE write to `elevation`, for the life of the world. See the field.
+        this.elevation[i] = elev;
+        // Elevation cools, and adds regional variety beyond pure latitude. Note this is
+        // lossy in both directions — clamped below 0.5 and mixed with `rough` above it —
+        // which is exactly why the raw field above is kept rather than inverted from here.
         this.heatOffset[i] = -34 * Math.max(0, elev - 0.5) + (rough - 0.5) * 10;
         this.moistOffset[i] = (damp - 0.5) * 26;
 

@@ -37,6 +37,11 @@ const width = arg('width', 240);
 const height = arg('height', 144);
 const days = arg('days', 1200);
 const seed = arg('seed', 20260729);
+// ★ `--beam` IS THE BAND BEAM, DELIBERATELY. It is legacy sugar for the original
+// single-beam configuration, `--beam-width` is a band width in columns, and every number
+// SIMULATION.md recorded under it was taken with a full-height band. The catalogue's
+// default shape is now a travelling blob; this flag is not, so those runs still
+// reproduce. For a blob, use `--cycles anvil` or `--cycles crucible`.
 const beam = flag('beam');
 // Severity and recovery are SEPARATE knobs. See SIMULATION.md: collapsing them into a
 // single "period" makes a longer period mean a slower beam, so each tile bakes longer

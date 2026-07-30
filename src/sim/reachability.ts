@@ -124,10 +124,17 @@ export function tarjan(adj: readonly Set<Biome>[]): Biome[][] {
 /**
  * Flag combinations worth probing.
  *
- * Not the full 2^10 power set — the ruleset only ever tests a handful of combinations,
- * and the ones that matter are the ones a real cycle can produce together. Focus never
+ * Not the full power set — the ruleset only ever tests a handful of combinations, and
+ * the ones that matter are the ones a real cycle can produce together. Focus never
  * appears without Beam or Eruption, and Uplift never appears without Quake, because
  * that is how cycles.ts raises them.
+ *
+ * ★ THE SAME IS TRUE OF THE SIX WEATHER FLAGS AND IT IS WHY THEY APPEAR IN PAIRS. A
+ * storm has ONE type per day, and a heavy type always raises its light partner — a
+ * downpour is `Rain | HeavyRain | Storm`, never `HeavyRain` alone. Probing the bare
+ * heavy bit would be probing a state the simulation cannot produce, which is the same
+ * class of error as a rule gated on a flag no cycle raises: it would report an edge as
+ * live that nothing can ever fire.
  */
 export const FLAG_COMBOS: readonly number[] = [
   0,
@@ -144,6 +151,18 @@ export const FLAG_COMBOS: readonly number[] = [
   CycleFlag.Freeze,
   CycleFlag.Drought,
   CycleFlag.Beam | CycleFlag.Focus | CycleFlag.Quake,
+  // Weather: one type per storm-day, heavy always carrying its light partner.
+  CycleFlag.Rain,
+  CycleFlag.Rain | CycleFlag.HeavyRain | CycleFlag.Storm,
+  CycleFlag.Cloud,
+  CycleFlag.Cloud | CycleFlag.HeavyCloud,
+  CycleFlag.Wind,
+  CycleFlag.Wind | CycleFlag.HeavyWind,
+  // Weather composes with the calendar, and the drying ladder is where they meet: a
+  // gale during a drought is the driest thing the world produces, and cloud during a
+  // heatwave is the mildest.
+  CycleFlag.Wind | CycleFlag.HeavyWind | CycleFlag.Drought,
+  CycleFlag.Cloud | CycleFlag.HeavyCloud | CycleFlag.Heatwave,
 ];
 
 const HEATS: number[] = [];
@@ -152,6 +171,34 @@ const MOISTS: number[] = [];
 for (let m = 0; m <= 100; m += 5) MOISTS.push(m);
 
 const scratchCounts = new Int32Array(BIOME_COUNT);
+
+/**
+ * A river ring mask that is ACHIEVABLE on the grid and maximally spread, indexed by how
+ * many river neighbours the probe placed.
+ *
+ * ★ WHY NOT SWEEP ALL 64 MASKS. `satisfiable` already costs
+ * (unsatisfiable rules × flag combos × 23×23 neighbour pairs × 7 water counts × 45 heats ×
+ * 21 moistures), which is 30 s on a restricted world; another factor of 64 would make the
+ * viewer's reachability endpoint useless and `sim:check` unrunnable.
+ *
+ * ★ WHY A SINGLE MASK PER COUNT IS STILL SOUND. This function's job is to answer "can this
+ * rule EVER fire", so it only has to be able to reach a witness, and it must never
+ * manufacture one that the grid cannot produce. Every mask below is a real neighbourhood —
+ * n river tiles placed as far apart as the ring allows — so a `true` here is honest. The
+ * spread choice is the one that reaches the admitting side of `CHANNEL_OK`; a clustered
+ * choice would report `the channel extends` as UNSATISFIABLE, which is a loud false alarm
+ * rather than a silent false pass. Note 4+ has no spread option at all: the largest
+ * independent set on a 6-cycle is 3, so those masks are genuinely adjacent-containing.
+ */
+const SPREAD_RING: readonly number[] = [
+  0b000000, // 0 — no river neighbours
+  0b000001, // 1 — a tip
+  0b000101, // 2 — 120° apart: a hole in a channel
+  0b010101, // 3 — a three-way confluence hole
+  0b010111, // 4+ — cannot avoid an adjacent pair; refused, correctly
+  0b011111,
+  0b111111,
+];
 
 function makeContext(
   biome: Biome,
@@ -171,12 +218,24 @@ function makeContext(
   const a = Math.ceil(land / 2);
   scratchCounts[probeA]! += a;
   scratchCounts[probeB]! += land - a;
+  // ★ EVERY `TileContext` FIELD MUST BE FILLED HERE. The probe runs against a context this
+  // function builds by hand rather than against `World.buildContext`, so a field added to
+  // the interface and forgotten here does not fail to compile into anything visible — it
+  // silently probes a malformed world, and every rule that reads it is mis-reported.
+  // River neighbours are all treated as upstream, which is the permissive case and is
+  // achievable (a spring on a ridge above every one of them).
+  const riverNeighbours = scratchCounts[Biome.River]!;
   return {
     biome,
     heat,
     moisture,
     waterNeighbours,
     neighbourCounts: scratchCounts,
+    riverRing: SPREAD_RING[Math.min(riverNeighbours, 6)]!,
+    upstreamRiverNeighbours: riverNeighbours,
+    // A tile with somewhere for water to go in every direction — a peak, which is
+    // achievable and is the permissive case for the two nucleation gates.
+    downhillNeighbours: 6,
     flags,
     underBeam: (flags & CycleFlag.Beam) !== 0,
   };
@@ -300,16 +359,24 @@ export function cachedReachableCore(allowedFlags: number): ReachableCore | undef
  * to its largest strongly connected component — as a generator that yields after every
  * rule it tests.
  *
- * The yielding is not decoration. MEASURED on this ruleset (160 rules), the sweep costs:
+ * The yielding is not decoration. MEASURED on this ruleset — 185 rules, six cycle kinds,
+ * whose flags between them are mask 65535 — the sweep costs:
  *
- *     all five kinds (mask 1023)              0.16 s     0 unsatisfiable rules
- *     no cycles at all (mask 0)               4.7 s     65 unsatisfiable rules
- *     seasons + monsoon + tectonics (972)    30.8 s     47 unsatisfiable rules
+ *                                            wall   unsatisfiable   flag combos admitted
+ *     all six kinds (mask 65535)             1.1 s        0                22
+ *     no cycles at all (mask 0)              5.9 s       69                 1
+ *     seasons + monsoon + tectonics (972)   34.9 s       51                 8
+ *
+ * ★ THE CONFIGURATION IS THE RULESET, NOT A WORLD. No grid is built and no world size
+ * enters; the only input is the flag mask. The seconds are wall clock from one run on one
+ * machine (Node 24) and are a guide to the ORDER of magnitude and to the ratio between the
+ * rows — the ratio is the durable part, the absolute seconds are not something to regress
+ * against.
  *
  * The cost is (unsatisfiable rules × admitted flag combinations), because a rule that
  * CAN fire exits on its first probe while a rule that cannot must exhaust
- * 22×22 neighbour pairs × 7 water counts × 45 heats × 21 moistures for every admitted
- * combination. A restricted world is therefore the expensive case, and a 30-second
+ * 23×23 neighbour pairs × 7 water counts × 45 heats × 21 moistures for every admitted
+ * combination. A restricted world is therefore the expensive case, and a 35-second
  * synchronous call would freeze the viewer's event loop completely. Callers that must
  * stay responsive drive this generator and yield to their event loop between rules;
  * `reachableCore` below is the blocking convenience form, for scripts.

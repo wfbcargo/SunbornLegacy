@@ -70,6 +70,23 @@ if (startSizeError !== null) {
   process.exit(1);
 }
 
+// The preset is checked against the size too, for the same reason and at the same moment.
+// `checkCycles` is what enforces `2*radiusHexes + 1 < min(width, height)`, and nothing
+// called it at startup: `--width 20 --height 20` with the default `crucible` built an
+// r=16 blob in a 20×20 world, which is not a travelling focus but a permanent global heat
+// offset — every one of the 400 tiles heated on every active day. Degenerate, silent, and
+// exactly the failure `checkSize` already refuses to make.
+const startCycleError = checkCycles(START_CYCLES, START_WIDTH, START_HEIGHT);
+if (startCycleError !== null) {
+  console.error(
+    `\n  The "${START_PRESET}" preset does not fit a ${START_WIDTH}×${START_HEIGHT} world.\n` +
+      `  ${startCycleError}\n\n` +
+      `  Use a bigger world:  npm run viewer -- --width 240 --height 144\n` +
+      `  Or a preset without a beam:  npm run viewer -- --cycles garden\n`,
+  );
+  process.exit(1);
+}
+
 const session = new ViewerSession({
   width: START_WIDTH,
   height: START_HEIGHT,
@@ -232,10 +249,13 @@ function control(body: ControlBody): { ok: boolean; error?: string } {
       const sizeError = checkSize(width, height);
       if (sizeError !== null) return { ok: false, error: sizeError };
 
-      if (body.cycles !== undefined) {
-        const cycleError = checkCycles(body.cycles);
-        if (cycleError !== null) return { ok: false, error: cycleError };
-      }
+      // The cycles are checked whether or not this request carries any. `session.reset`
+      // falls back to the session's current cycles, so "resize only" still lands a beam
+      // in a world it may no longer fit — the constraint is on the PAIR, and skipping the
+      // check when only one half of the pair moved is how the r=16-in-a-20×20 blob got in.
+      const cycles = body.cycles ?? session.cycles;
+      const cycleError = checkCycles(cycles, width, height);
+      if (cycleError !== null) return { ok: false, error: cycleError };
       if (body.seed !== undefined && !Number.isFinite(body.seed)) {
         return { ok: false, error: 'Seed must be a finite number.' };
       }
@@ -262,13 +282,16 @@ function control(body: ControlBody): { ok: boolean; error?: string } {
  * The analysis is expensive and the answer is worth waiting for, so this route never
  * blocks: it returns what it has and says whether it is finished.
  *
- * MEASURED cost of one uncached cycle set (160 rules): 0.16 s for all five kinds, 4.7 s
- * for none, 30.8 s for seasons + monsoon + tectonics — the restricted worlds are the
- * expensive ones, because a rule that CANNOT fire has to exhaust the whole probe space
- * before it can be ruled out. Thirty seconds of synchronous work would stop the frame
- * route dead, so the generator is driven a rule at a time with a yield to the event loop
- * between each, and the client polls. Results are cached by flag vocabulary, so the
- * second question about the same cycle kinds is free.
+ * MEASURED cost of one uncached cycle set over this tree's 185-rule set: 1.1 s for all six
+ * cycle kinds (mask 65535), 5.9 s for none (mask 0), 34.9 s for seasons + monsoon +
+ * tectonics (mask 972) — the restricted worlds are the expensive ones, because a rule that
+ * CANNOT fire has to exhaust the whole probe space before it can be ruled out. The sweep
+ * takes no world size: its only input is the flag mask, so those seconds do not scale with
+ * the map. (Wall clock, one run, Node 24 on one machine — the 30× spread between best and
+ * worst case is the durable fact here, not the absolute figures.) Thirty-five seconds of
+ * synchronous work would stop the frame route dead, so the generator is driven a rule at a
+ * time with a yield to the event loop between each, and the client polls. Results are
+ * cached by flag vocabulary, so the second question about the same cycle kinds is free.
  */
 interface Pending {
   steps: Generator<{ done: number; total: number }, ReachableCore, void>;
@@ -279,9 +302,11 @@ interface Pending {
 const pending = new Map<number, Pending>();
 
 function pump(mask: number, job: Pending): void {
-  // One rule per macrotask. A single rule costs at most ~800 ms on this ruleset, which
-  // is the worst hiccup the poll loop can see; the alternative — a batch per tick — buys
-  // nothing, because the total is dominated by the sweep either way.
+  // One rule per macrotask. MEASURED per rule across all 185 at each of the three masks
+  // above, the slowest single rule is 0.7-0.8 s, always an unsatisfiable one under the
+  // restricted mask 972 — which is the worst hiccup the poll loop can see. (Which rule
+  // holds the record moves between runs; the magnitude does not.) The alternative — a
+  // batch per tick — buys nothing, because the total is dominated by the sweep either way.
   setImmediate(() => {
     const next = job.steps.next();
     if (next.done === true) {

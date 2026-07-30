@@ -822,11 +822,21 @@ export interface BeamConfig {
   mode: 'off' | 'rotating' | 'terminal';
   transitDays: number;   // SEVERITY — dwell per tile
   cycleDays:   number;   // RECOVERY — gap between purges; dormant 83% of the time at 60/360
-  widthCols:   number;   // HARD CONSTRAINT: >= ceil(width / transitDays)
+  widthCols:   number;   // BAND ONLY. Constraint: >= ceil(width / transitDays)
   startedStep: Step;
   direction: 1 | -1;
 }
 ```
+
+⚠️ **`widthCols` and its constraint are band-only, and the band is no longer the default
+shape.** The prototype's beam is now `shape: 'band' | 'blob'` defaulting to `blob` — a hex disc
+of `radiusHexes` travelling a sinusoidal track, swept along the day's arc (decision `0008`).
+Under a blob the severity dial is `radiusHexes`, and the constraint `widthCols >= ceil(width /
+transitDays)` — which exists so a full-height wall cannot step over a column without lighting it
+— has no analogue: a blob is *expected* to miss most of the world on any given day, and what
+bounds it instead is `2·radiusHexes + 1 < min(width, height)` so the disc cannot wrap onto
+itself. The band survives as the validated `anvil` configuration and every number recorded
+against it still reproduces; a `BeamConfig` for the shipped default needs a radius, not a width.
 
 **Two knobs, not one.** The simulation design collapsed these into `periodDays`, which SIMULATION.md
 documents as producing the *opposite* of the intended effect: a longer period means a slower beam,
@@ -1147,11 +1157,19 @@ leak was in a return value rather than in row access:
    `unknown_tiles` and `confidence`, is explicitly non-binding across unwitnessed segments, and
    `arrives_at` is revised forward at each region crossing. A CI gate fails any code path reachable
    from a `private` operation that touches the truth-plane pathfinder.
-2. **Per-site beam forecast.** `daysUntil: Record<SiteId, number>` on a `public` push channel is
-   exactly invertible against the prototype's `daysUntilBeam(col)` — `col = w·(daysUntil +
-   intoCycle)/transitDays` — so a spectator token yields the exact column of every settlement in the
-   world, refreshed live. **Fix:** the cosmic plane serves column geometry only. Per-site forecasts
-   are `vis_kind='account'` (your own sites) or region-gated.
+2. **Per-site beam forecast.** `daysUntil: Record<SiteId, number>` on a `public` push channel
+   leaks position, because the forecast is a function of the site's location and the beam's
+   geometry alone. Under the band this was *exactly* invertible against the prototype's
+   `daysUntilBeam(col)` — `col = w·(daysUntil + intoCycle)/transitDays` — so a spectator token
+   yielded the exact column of every settlement in the world, refreshed live. **The closed form
+   is band-only and no longer holds in the general case:** the prototype's signature is now
+   `daysUntilBeam(col, row)`, because the shipped beam is a disc on a sinusoidal track and a
+   column no longer determines an arrival time — a tile the track misses returns `Infinity`,
+   meaning *never*, not *not yet* (decision `0008`). That weakens the inversion to a constraint
+   rather than an equation, which is a smaller leak and not a closed one: a series of forecasts
+   over time still narrows a site to the track's neighbourhood. **Fix, unchanged:** the cosmic
+   plane serves column geometry only. Per-site forecasts are `vis_kind='account'` (your own
+   sites) or region-gated.
 3. **Breakeven calculator.** The economy design's unauthenticated
    `GET /v1/economy/breakeven?atTile=` returned `localYieldPerDay` (deposit richness after crowding)
    and `amortHorizonDays` (days until beam). Iterating enumerable tile ids yields a complete geology

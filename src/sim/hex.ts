@@ -117,6 +117,95 @@ export class HexTorus {
   }
 }
 
+/**
+ * The horizontal position of a tile's centre, in column-spacing units.
+ *
+ * Odd rows are shifted right by half a column (odd-r), so a tile's x is `col` on even
+ * rows and `col + 0.5` on odd ones. This is the ONE fact that turns hex distance into
+ * arithmetic instead of a cube-coordinate conversion — see `hexDistanceToPoint`.
+ */
+export function hexX(col: number, row: number): number {
+  return col + 0.5 * (row & 1);
+}
+
+/**
+ * Hex distance from a tile to an arbitrary point on the torus.
+ *
+ * ★ WHY A POINT AND NOT A TILE. The travelling beam's centre moves several columns and
+ * tens of rows in a day, so its position within a day is a continuous arc, not a tile.
+ * A tile-to-tile distance would force the arc to be rounded before it is measured, and
+ * rounding a track that is thinner than its own daily step is how a swept blob becomes
+ * a row of disjoint clumps.
+ *
+ * The closed form. For pointy-top hexes, distance from a horizontal offset `dx` (in
+ * column units) and a vertical offset `dy` (in rows) is
+ *
+ *     max(|dx| + |dy| / 2, |dy|)
+ *
+ * — the second term is the pure-vertical case, where each row of travel already buys
+ * half a column of horizontal reach for free, and the first is everything else. On
+ * integer tile coordinates it agrees exactly with the cube-coordinate formula
+ * `(|dq| + |dr| + |ds|) / 2` that `distance()` uses; on fractional points it is the
+ * natural continuous extension, which the cube form does not have.
+ *
+ * ★ WRAP IS EXACT, not approximated, under one stated condition. The x-wrap is exact
+ * unconditionally: the expression is monotone in `|dx|`, so the shortest horizontal
+ * offset is always the best one. The y-wrap is exact whenever the distance being tested
+ * is under `height / 2`, because going the other way round the torus costs at least
+ * `height - |dy| >= height / 2` rows. Callers that care — the blob beam — are held to
+ * `2 * radius + 1 < min(width, height)` by `limits.ts` precisely so this holds.
+ */
+export function hexDistanceToPoint(
+  col: number,
+  row: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): number {
+  return hexDistanceWithin(col, row, x, y, width, height, Infinity);
+}
+
+/**
+ * `hexDistanceToPoint`, with a cutoff — returns `Infinity` rather than a distance the
+ * caller has already decided is too far.
+ *
+ * This exists for the swept blob beam, which asks the same question of one tile against
+ * ~100 points along a day's arc and only ever wants the smallest answer. Because the
+ * distance is never less than `|dy|`, a tile whose ROW offset alone exceeds the limit
+ * can be discarded before its column offset is even computed — one subtract and one
+ * compare instead of the full form. With the limit tightened to the best distance seen
+ * so far, most of an arc is rejected on that first test.
+ *
+ * It is the same arithmetic as the plain form, not a second copy of it: the plain form
+ * calls this with no limit. A separate "fast path" would be a second implementation of
+ * the geometry, free to agree with itself while disagreeing with the simulator.
+ */
+export function hexDistanceWithin(
+  col: number,
+  row: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  limit: number,
+): number {
+  let dy = row - y;
+  if (dy > height / 2) dy -= height;
+  else if (dy < -height / 2) dy += height;
+  if (dy < 0) dy = -dy;
+  if (dy > limit) return Infinity;
+
+  let dx = hexX(col, row) - x;
+  if (dx > width / 2) dx -= width;
+  else if (dx < -width / 2) dx += width;
+  if (dx < 0) dx = -dx;
+
+  const diagonal = dx + dy * 0.5;
+  const d = diagonal > dy ? diagonal : dy;
+  return d > limit ? Infinity : d;
+}
+
 /** odd-r offset → cube coordinates. */
 function cubeFromOffset(col: number, row: number): [number, number, number] {
   const q = col - ((row - (row & 1)) >> 1);

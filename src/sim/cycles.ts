@@ -64,6 +64,7 @@
  * closed form (the beam) override it for an exact, unbounded answer.
  */
 
+import { hexDistanceWithin, hexX } from './hex.ts';
 import { hash32, rollAt } from './rng.ts';
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,31 @@ export const CycleFlag = {
   Freeze: 1 << 8,
   /** Seasonal dry spell. */
   Drought: 1 << 9,
+
+  // -- Weather systems: the six the `weather` cycle carries ------------------
+  //
+  // These are six TYPES of one travelling thing, not six independent phenomena, and
+  // they come in light/heavy pairs. A heavy type always raises its light partner as
+  // well, so a rule that means "any rain" tests `Rain` and one that means "a downpour"
+  // tests `HeavyRain`; nothing has to enumerate a pair.
+
+  /** Rain falling here. Raised by a rain storm and, with it, by a heavy one. */
+  Rain: 1 << 10,
+  /**
+   * A downpour. Also raises `Storm`, deliberately: `Storm` is the ruleset's existing
+   * word for "standing water, flooding, dissolution of glass", the monsoon and the wet
+   * season already raise it, and a cloudburst is the same event at a smaller scale. Not
+   * doing this would have meant re-gating every Storm rule to say `Storm | HeavyRain`.
+   */
+  HeavyRain: 1 << 11,
+  /** Wind over this tile. Dries and abrades; it does NOT carry heat — see `Weather`. */
+  Wind: 1 << 12,
+  /** A gale. Strips soft cover and drives sand. */
+  HeavyWind: 1 << 13,
+  /** Cloud cover. Shade: it slows drying rather than causing anything. */
+  Cloud: 1 << 14,
+  /** Heavy overcast. */
+  HeavyCloud: 1 << 15,
 } as const;
 export type CycleFlag = (typeof CycleFlag)[keyof typeof CycleFlag];
 
@@ -119,6 +145,12 @@ export const CYCLE_FLAG_NAMES: readonly (readonly [number, string])[] = [
   [CycleFlag.Heatwave, 'heatwave'],
   [CycleFlag.Freeze, 'freeze'],
   [CycleFlag.Drought, 'drought'],
+  [CycleFlag.Rain, 'rain'],
+  [CycleFlag.HeavyRain, 'heavyrain'],
+  [CycleFlag.Wind, 'wind'],
+  [CycleFlag.HeavyWind, 'heavywind'],
+  [CycleFlag.Cloud, 'cloud'],
+  [CycleFlag.HeavyCloud, 'heavycloud'],
 ];
 
 export function flagNames(flags: number): string[] {
@@ -139,8 +171,28 @@ export function flagNames(flags: number): string[] {
  * contribution, which is what keeps composition order-independent.
  */
 export class CycleEffect {
-  /** Added to the tile's heat before the hydrology and the rules see it. */
+  /**
+   * ACUTE heat, added to the tile's heat before the hydrology and the rules see it.
+   *
+   * ★ This channel must never be low-passed. `Focus` dwell under the blob beam is as
+   * short as one day and carries +115 against a melt gate of 120, so putting it behind
+   * a thermal filter does not soften the melt chemistry, it deletes it. Beam, volcanism
+   * and tectonics write here.
+   */
   heat = 0;
+  /**
+   * Slow, seasonal, AMBIENT heat — the channel that passes THROUGH a tile's thermal
+   * filter. Distinct from `heat` for the reason above: a season is a months-long
+   * forcing that a coastline may legitimately lag behind, where a purge is a one-day
+   * event that a lag would erase.
+   *
+   * `World.buildContext` relaxes the tile's stored temperature towards
+   * `heatAt(...) + ambientHeat` and then adds `heat` on top, so the two channels are no
+   * longer interchangeable: putting a beam here softens it into nothing, and putting a
+   * season on `heat` silently switches maritime climate off. `Seasons` is the only
+   * shipped writer.
+   */
+  ambientHeat = 0;
   /** Added to the moisture diffusion TARGET, exactly like marsh neighbours are. */
   moisture = 0;
   /** OR of every flag raised on this tile today. */
@@ -148,11 +200,108 @@ export class CycleEffect {
 
   reset(): this {
     this.heat = 0;
+    this.ambientHeat = 0;
     this.moisture = 0;
     this.flags = 0;
     return this;
   }
 }
+
+// ---------------------------------------------------------------------------
+// The world view
+// ---------------------------------------------------------------------------
+
+/**
+ * A read-only window on the grid, for cycles that resolve their day against terrain.
+ *
+ * Deliberately NOT `World`: no mutation, no stepping, no I/O (R-007). A cycle handed
+ * one of these can ask what the ground is and how wet it is, and nothing else — it
+ * cannot step the world, cannot write a tile, and cannot reach the hydrology constants.
+ * Coordinates wrap on both axes, exactly like `HexTorus.index`.
+ *
+ * ★ IT IS THE GRID AS OF THE START OF THE DAY BEING RESOLVED. `dayState` runs once per
+ * day, before the sweep touches a single tile, so every cycle sees the same snapshot
+ * and cycle order stays irrelevant. A cycle that read the grid from `affect` would see
+ * a half-stepped world and its answer would depend on where the gaze happened to be.
+ *
+ * ★ WHAT IT COSTS. `cycles.ts:41-45` defends `dayState` purity with lazy fast-forward
+ * of unobserved regions, and a world-reading cycle gives that up: its day N depends on
+ * the world, which depends on day N-1. `ARCHITECTURE.md` decision 10.1 already abandoned
+ * that property for terrain — terrain is stepped every step at coarse resolution, not
+ * reconstructed on contact — so the price was paid before this interface existed. What
+ * survives is the weaker and still sufficient guarantee: same seed + same options ⇒
+ * bit-identical world (R-004). A cycle that reads the world declares `readsWorld` so
+ * its forecasts can be labelled honestly.
+ */
+export interface WorldView {
+  readonly width: number;
+  readonly height: number;
+  /** Biome id at a wrapping coordinate. */
+  biomeAt(col: number, row: number): number;
+  /** Moisture at a wrapping coordinate, on the same 0-100 scale the rules use. */
+  moistureAt(col: number, row: number): number;
+  /**
+   * OR of `TerrainClass` bits at a wrapping coordinate — the GEOGRAPHY of a tile,
+   * decided by `BiomeDef` predicates rather than by a list of biome ids.
+   *
+   * ★ WHY THIS IS NOT `biomeAt` PLUS A LOOKUP TABLE IN THE CYCLE. A cycle that reads
+   * `biomeAt` and compares against ids needs the biome taxonomy, and `cycles.ts` cannot
+   * import `biomes.ts` — `biomes.ts` already imports `CycleFlag`, so the dependency
+   * would become a cycle whose safety depends on which entry point happens to evaluate
+   * first. The alternative, a hand-written list of "which ids are sea" inside a cycle,
+   * is exactly the trap `biomes.ts` refuses to build for its own biome sets: the day a
+   * biome is added, the storm classifier silently stops seeing it. `World` derives this
+   * from `BiomeDef.water && !molten` etc., so a new biome joins the classification the
+   * moment it joins `BIOMES`. See decision `0015`.
+   */
+  terrainAt(col: number, row: number): number;
+}
+
+/**
+ * The geography a world-reading cycle is allowed to see — three DERIVED predicates, not
+ * a taxonomy of biomes.
+ *
+ * ★ `Sea` IS THE STORM CLASSIFIER AND IT IS `water && !molten`, WHICH IS NOT A STYLE
+ * CHOICE. Measured as shipped, 1500 days at 160×96, rain share per 300-day window:
+ * 40.7 · 25.8 · 24.1 · 34.3 · 32.6%, oscillating with no trend and a normalised type
+ * entropy of 0.969 — all six storm types stay in use. The epic's prior analysis
+ * measured the alternative on the same instrument: gated on `moisture > 60` the same
+ * storm LATCHES — 80.1 → 99.3 → 93.4 → 100.0 → 94.8% — because it rains, the ground
+ * gets wet, so it rains forever, and the sea-gated storm could not shift its own
+ * classifier's input at all (final water share 23.8% against 23.9% across a 3×
+ * magnitude range).
+ *
+ * Never widen this to marsh, swamp or moisture, and note that spec 5's river biome is
+ * deliberately `water: false` for the same reason — a storm that makes rain that makes
+ * rivers that make the storm rain is the same latch with an extra hop.
+ */
+export const TerrainClass = {
+  /** `BiomeDef.water && !molten` — ocean, shallows, frozen sea. Never lava. */
+  Sea: 1 << 0,
+  /** `BiomeDef.molten` — lava. */
+  Molten: 1 << 1,
+  /** `BiomeDef.stone` — consolidated ground: mountain, rock, basalt, badlands, glass. */
+  Stone: 1 << 2,
+} as const;
+export type TerrainClass = (typeof TerrainClass)[keyof typeof TerrainClass];
+
+/**
+ * The view handed to a cycle resolved with no world attached.
+ *
+ * `forecast()` is an API call that may run before a world exists, or against a cycle
+ * held on its own. `width === 0` is the signal, and it is a signal rather than a crash
+ * because a forecast for a world-reading cycle is a PROJECTION anyway: the honest answer
+ * when there is no terrain to project from is `null`, which the cycle returns for
+ * itself. A cycle with `readsWorld` MUST check `view.width === 0`; one without never
+ * touches the view at all, which is why the five shipped kinds ignore the parameter.
+ */
+export const DETACHED_VIEW: WorldView = {
+  width: 0,
+  height: 0,
+  biomeAt: () => 0,
+  moistureAt: () => 0,
+  terrainAt: () => 0,
+};
 
 // ---------------------------------------------------------------------------
 // Introspection types
@@ -183,6 +332,18 @@ export interface CycleForecast {
   /** Mean days between occurrences at this tile. The honest answer for quakes. */
   readonly expectedIntervalDays: number;
   readonly label: string;
+  /**
+   * How much weight the arrival day can bear.
+   *
+   * `exact` — the cycle is a pure function of (seed, key, day), so running its schedule
+   * forward IS the simulation and the day is a fact about the future.
+   * `projected` — the cycle reads the world (`readsWorld`), so the forecast assumed the
+   * terrain stops changing, and it will not. The number is a best current estimate.
+   *
+   * This is not the same axis as `announced`, which is about whether a world would TELL
+   * a player. A quake is exact and unannounced; a storm front is projected and visible.
+   */
+  readonly basis: 'exact' | 'projected';
 }
 
 export interface CycleDescription {
@@ -250,11 +411,28 @@ export abstract class WorldCycle<S = unknown> {
   }
 
   /**
-   * The cycle's derived state for one day. MUST be a pure function of
-   * (worldSeed, key, day) — no reading of `this` mutable state, no accumulation.
-   * Return null when the cycle is dormant today; World then skips it entirely.
+   * True for a cycle whose day depends on the terrain, not only on the calendar.
+   *
+   * Two things key off it and nothing else may: `forecast` labels its answers
+   * `projected` rather than `exact`, and the catalogue advertises it so a GM composing
+   * a cycle set can see which of their choices are schedules and which are weather.
+   * Default false — a cycle is calendar-pure until it says otherwise.
    */
-  abstract dayState(day: number): S | null;
+  get readsWorld(): boolean {
+    return false;
+  }
+
+  /**
+   * The cycle's derived state for one day. MUST be a pure function of
+   * (worldSeed, key, day, view) — no reading of `this` mutable state, no accumulation.
+   * Return null when the cycle is dormant today; World then skips it entirely.
+   *
+   * `view` is the grid as of the START of `day`, and a cycle that touches it must say so
+   * via `readsWorld`. A cycle that ignores it — every kind shipped today — may simply
+   * declare `dayState(day: number)`: a one-parameter override satisfies a two-parameter
+   * signature in TypeScript, so the five existing kinds needed no change at all.
+   */
+  abstract dayState(day: number, view: WorldView): S | null;
 
   /** Hot path: accumulate this cycle's contribution for one tile. Must not allocate. */
   abstract affect(state: S, out: CycleEffect, col: number, row: number): void;
@@ -293,10 +471,11 @@ export abstract class WorldCycle<S = unknown> {
     row: number,
     fromDay: number,
     horizonDays: number = DEFAULT_FORECAST_HORIZON,
+    view: WorldView = DETACHED_VIEW,
   ): CycleForecast | null {
     const start = Math.floor(fromDay);
     for (let d = start; d < start + horizonDays; d++) {
-      const flags = this.probe(d, col, row);
+      const flags = this.probe(d, col, row, view);
       if (flags === 0) continue;
 
       // Found the arrival. Walk forward to measure how long it lasts and how hard it
@@ -306,7 +485,7 @@ export abstract class WorldCycle<S = unknown> {
       let peakMoisture = 0;
       let union = 0;
       for (let e = d; e < start + horizonDays; e++) {
-        const f = this.probe(e, col, row);
+        const f = this.probe(e, col, row, view);
         if (f === 0) break;
         duration++;
         union |= f;
@@ -323,8 +502,13 @@ export abstract class WorldCycle<S = unknown> {
   }
 
   /** Evaluate one day at one tile in isolation. Leaves the result in `this.scratch`. */
-  protected probe(day: number, col: number, row: number): number {
-    const state = this.dayState(day);
+  protected probe(
+    day: number,
+    col: number,
+    row: number,
+    view: WorldView = DETACHED_VIEW,
+  ): number {
+    const state = this.dayState(day, view);
     this.scratch.reset();
     if (state === null) return 0;
     this.affect(state, this.scratch, col, row);
@@ -352,6 +536,7 @@ export abstract class WorldCycle<S = unknown> {
       announced: this.announced,
       expectedIntervalDays: this.expectedIntervalDays(col, row),
       label: this.forecastLabel(flags),
+      basis: this.readsWorld ? 'projected' : 'exact',
     };
   }
 }
@@ -364,6 +549,22 @@ export abstract class WorldCycle<S = unknown> {
 function wrapDelta(delta: number, n: number): number {
   const m = ((delta % n) + n) % n;
   return m > n / 2 ? m - n : m;
+}
+
+/**
+ * ABSOLUTE shortest offset between two positions ALREADY NORMALISED to [0, n).
+ *
+ * `wrapDelta`'s two modulo operations exist because it accepts any delta; when both
+ * operands are known to be on-axis the difference is in (-n, n) and one compare does the
+ * job. Identical to `wrapDelta` composed with `Math.abs` for every such input — the two
+ * disagree only at exactly ±n/2, where the sign differs and the magnitude does not.
+ */
+function axisOffset(a: number, b: number, n: number): number {
+  let d = a - b;
+  const half = n / 2;
+  if (d > half) d -= n;
+  else if (d < -half) d += n;
+  return d < 0 ? -d : d;
 }
 
 function hashKey(s: string): number {
@@ -405,9 +606,255 @@ function epochLookback(durationDays: number): number {
   return Math.max(1, Math.ceil(Math.max(0, durationDays) / EPOCH_DAYS));
 }
 
+// ---------------------------------------------------------------------------
+// The travelling disc — ONE implementation of the sinusoid
+// ---------------------------------------------------------------------------
+
+/**
+ * A sinusoidal track across the torus: x runs the full width once per traverse, y is a
+ * sine about `homeRow`.
+ *
+ * ★ THERE IS EXACTLY ONE OF THESE AND THAT IS THE POINT. The beam travels this curve and
+ * so does every storm; decision `0008` records that two implementations of one curve is
+ * how this repo got two separate beam seam bugs, so the second consumer extracted the
+ * first one's geometry rather than writing its own. The extraction was verified by the
+ * golden hashes: `still 10468117cccd7501` and `crucible e34f6edacd80b9d0` are unchanged
+ * across it, so the curve the beam draws today is the same curve to the last bit.
+ *
+ * `amplitudeHalfHeights` is a FRACTION of `height / 2` rather than a row count, because
+ * an absolute amplitude is correct at exactly one world size. `oscillations` should be a
+ * whole number for anything whose track must meet itself at the torus seam.
+ */
+export interface SinusoidTrack {
+  readonly width: number;
+  readonly height: number;
+  /** Column the track starts from at p = 0. The beam starts at 0; a storm anywhere. */
+  readonly startCol: number;
+  readonly direction: 1 | -1;
+  readonly amplitudeHalfHeights: number;
+  readonly oscillations: number;
+  /** Phase of the sine, in turns [0,1). */
+  readonly wavePhase: number;
+  /** Row the sine oscillates about. */
+  readonly homeRow: number;
+}
+
+/**
+ * One day's worth of a travelling disc's path, sampled, with the bounding box that
+ * rejects most of the world before the per-tile inner loop runs.
+ *
+ * ★ THE PATH IS SWEPT, NOT POINT-SAMPLED, and that is not a refinement — it is the
+ * difference between a track and a row of disjoint beads. At 240 columns and a 45-day
+ * traverse the centre advances 5.33 columns a day and, at 9 oscillations of full
+ * amplitude, up to 90 ROWS a day; a disc smaller than its own daily step sampled once a
+ * day leaves measured ZERO overlap between consecutive days.
+ *
+ * Endpoints are inclusive, so today's last sub-centre is tomorrow's first and the track
+ * can never develop a one-substep gap at a day boundary.
+ */
+export interface SweptArc {
+  /** Sub-centre x positions (column units, `hexX` space), normalised to [0, width). */
+  readonly xs: Float64Array;
+  /** Sub-centre rows, normalised to [0, height). */
+  readonly ys: Float64Array;
+  /** Centre of the day's x window, for the bounding-box reject. */
+  readonly xMid: number;
+  /** Half-span of that window plus the radius. Negative disables the reject. */
+  readonly xReach: number;
+  /** As above, on rows. */
+  readonly yMid: number;
+  readonly yReach: number;
+  /**
+   * Which half of the bounding box to test first — the one that rejects more.
+   *
+   * ★ NOT A MICRO-OPTIMISATION, AND IT IS NOT THE SAME ANSWER FOR EVERY TRACK. The
+   * reject runs once per tile per travelling disc per day, so it is the single hottest
+   * line either consumer has. A beam's day-arc is ~5 of 240 columns wide and up to 90 of
+   * 144 rows tall, so the COLUMN test throws away 84% of the world and the row test
+   * almost nothing. A storm's arc is the other shape — narrow in columns but travelling
+   * a third of the world's rows at a much slower pace, and there are several of them at
+   * once. Hardcoding one order makes the other consumer pay for the whole box.
+   *
+   * It is decided from the spans themselves, as a fraction of each axis, so a track that
+   * changes shape re-decides it for free.
+   */
+  readonly yFirst: boolean;
+}
+
+/**
+ * The degenerate track a cycle holds before `bind` gives it a grid. Never traversed —
+ * every consumer rebuilds its track in `onBind` — but it keeps the field non-nullable
+ * so no hot path has to test for a track that does not exist yet.
+ */
+const FLAT_TRACK: SinusoidTrack = {
+  width: 1,
+  height: 2,
+  startCol: 0,
+  direction: 1,
+  amplitudeHalfHeights: 0,
+  oscillations: 0,
+  wavePhase: 0,
+  homeRow: 0,
+};
+
+/** The track's x at progress `p` through one traverse. `p` is NOT wrapped by the caller. */
+function trackX(t: SinusoidTrack, p: number): number {
+  return mod(t.startCol + p * t.width * t.direction, t.width);
+}
+
+/** The track's row at progress `p`. */
+function trackY(t: SinusoidTrack, p: number): number {
+  const amplitude = t.amplitudeHalfHeights * (t.height / 2);
+  const phase = 2 * Math.PI * (t.oscillations * p + t.wavePhase);
+  return mod(t.homeRow + amplitude * Math.sin(phase), t.height);
+}
+
+/**
+ * Sub-centres per day, chosen so consecutive ones are at most about one hex apart.
+ *
+ * Over one day the centre moves `width / spanDays` columns and up to
+ * `π · amplitude · height · oscillations / spanDays` rows (the sine's peak slope), and
+ * hex distance is bounded by their sum. The ROW speed is what sets the number, which is
+ * the whole reason a point sample fails.
+ *
+ * Capped, because it is a per-tile inner loop and a GM can ask for a very fast, very
+ * wavy track. Past the cap the path is sampled coarser than one hex and may scallop —
+ * a visible artefact of an extreme setting rather than a silent one.
+ */
+function trackSubsteps(t: SinusoidTrack, spanDays: number, cap: number): number {
+  if (spanDays <= 0) return 1;
+  const colSpeed = t.width / spanDays;
+  const rowSpeed =
+    (Math.PI * Math.abs(t.amplitudeHalfHeights) * t.height * Math.abs(t.oscillations)) / spanDays;
+  return Math.min(cap, Math.max(1, Math.ceil(colSpeed + rowSpeed)));
+}
+
+/** Sample the arc from `p0` to `p0 + dp` in `n` steps, endpoints inclusive. */
+function sweepArc(
+  t: SinusoidTrack,
+  p0: number,
+  dp: number,
+  n: number,
+  radius: number,
+): SweptArc {
+  const xs = new Float64Array(n + 1);
+  const ys = new Float64Array(n + 1);
+
+  // Bounds are tracked as SIGNED offsets from the first sub-centre, so a window that
+  // straddles the torus seam is still one interval rather than two.
+  const x0 = trackX(t, p0);
+  const y0 = trackY(t, p0);
+  let xLo = 0;
+  let xHi = 0;
+  let yLo = 0;
+  let yHi = 0;
+
+  for (let k = 0; k <= n; k++) {
+    const p = p0 + (dp * k) / n;
+    const x = trackX(t, p);
+    const y = trackY(t, p);
+    xs[k] = x;
+    ys[k] = y;
+    const dx = wrapDelta(x - x0, t.width);
+    const dy = wrapDelta(y - y0, t.height);
+    if (dx < xLo) xLo = dx;
+    if (dx > xHi) xHi = dx;
+    if (dy < yLo) yLo = dy;
+    if (dy > yHi) yHi = dy;
+  }
+
+  // Reach = half the window plus the radius plus the half-column of odd-row shift. A
+  // window that already spans more than the axis is no filter at all, and a negative
+  // reach is the signal to skip the test rather than run one that can never fire.
+  const xSpan = xHi - xLo;
+  const ySpan = yHi - yLo;
+  const xReach = xSpan + 2 * radius + 1 >= t.width ? -1 : xSpan / 2 + radius + 0.5;
+  const yReach = ySpan + 2 * radius + 1 >= t.height ? -1 : ySpan / 2 + radius;
+  return {
+    xs,
+    ys,
+    xMid: mod(x0 + (xLo + xHi) / 2, t.width),
+    xReach,
+    yMid: mod(y0 + (yLo + yHi) / 2, t.height),
+    yReach,
+    // A disabled test (-1) filters nothing, so it always goes second.
+    yFirst: xReach < 0 || (yReach >= 0 && yReach / t.height < xReach / t.width),
+  };
+}
+
+/**
+ * MINIMUM hex distance from a tile to today's arc, or `Infinity` past `radius`.
+ *
+ * Minimum, never a sum: accumulating an effect per substep multiplies a tile's dose
+ * ~17-fold. Taking the minimum and applying the effect once preserves the property a
+ * full-height band had by construction — exactly one exposed evaluation per tile per day.
+ *
+ * The bounding-box reject in front of it is worth about a factor of ten on a swept
+ * track's overhead: the day's arc occupies ~5 of 240 columns at the shipped transit, so
+ * ~84% of tiles are discarded on two subtracts before the ~96-iteration loop is entered.
+ */
+function arcDistance(
+  arc: SweptArc,
+  col: number,
+  row: number,
+  width: number,
+  height: number,
+  radius: number,
+): number {
+  // ★ NO `wrapDelta` HERE, AND THAT IS DELIBERATE. Both operands are already normalised
+  // to their axis, so the difference is in (-n, n) and the shortest wrap is one compare
+  // and one subtract rather than two `%` operations. It is the same arithmetic
+  // `hexDistanceWithin` uses for the same reason, it agrees with `wrapDelta` on every
+  // value once the sign is dropped, and this runs once per tile per disc per day.
+  if (arc.yFirst) {
+    if (arc.yReach >= 0 && axisOffset(row, arc.yMid, height) > arc.yReach) return Infinity;
+    if (arc.xReach >= 0 && axisOffset(hexX(col, row), arc.xMid, width) > arc.xReach) return Infinity;
+  } else {
+    if (arc.xReach >= 0 && axisOffset(hexX(col, row), arc.xMid, width) > arc.xReach) return Infinity;
+    if (arc.yReach >= 0 && axisOffset(row, arc.yMid, height) > arc.yReach) return Infinity;
+  }
+
+  const { xs, ys } = arc;
+  let best = radius;
+  let hit = false;
+  for (let k = 0; k < xs.length; k++) {
+    const d = hexDistanceWithin(col, row, xs[k]!, ys[k]!, width, height, best);
+    if (d > best) continue;
+    best = d;
+    hit = true;
+    if (best === 0) break;
+  }
+  return hit ? best : Infinity;
+}
+
 // ===========================================================================
 // SolarBeam — the cleansing sweep
 // ===========================================================================
+
+/**
+ * What the beam IS, geometrically. Not a style: the two shapes have different
+ * severity models and only one of them matches the fiction.
+ *
+ * `band` — a full-height column band. Every row of a column is under it at once, so a
+ *   purge covers 100% of the world's tiles and dwell time is set by transit alone. This
+ *   is the shape every number in `SIMULATION.md` was measured with, and it is kept
+ *   because those numbers are the validated `anvil` prototype.
+ * `blob` — a hex disc of `radiusHexes` travelling a sinusoidal track, swept along the
+ *   day's arc. A focus that moves rather than a wall that passes. Coverage is now a
+ *   parameter rather than a constant 100%, and coverage — not heat budget — is what the
+ *   world consumes: see the radius table in the spec.
+ */
+export type SolarBeamShape = 'band' | 'blob';
+
+/**
+ * Ceiling on sub-centres per day for a swept blob. See `SolarBeam.onBind`.
+ *
+ * 4096 is roughly 40× what the shipped configuration needs, so nothing a GM is likely
+ * to compose reaches it; it exists so a pathological combination (a one-day transit
+ * across a 2048-wide world at 64 oscillations) degrades into a coarser track rather
+ * than a per-tile loop of a hundred thousand iterations.
+ */
+const BEAM_MAX_SUBSTEPS = 4096;
 
 export interface SolarBeamParams {
   /**
@@ -425,35 +872,138 @@ export interface SolarBeamParams {
    * Validated default: 60d transit / 360d cycle.
    */
   cycleDays: number;
-  /** Width of the scorching band, in columns. */
+  /** Which geometry this beam is. See `SolarBeamShape`. */
+  shape: SolarBeamShape;
+  /** BAND ONLY. Width of the scorching band, in columns. */
   widthCols: number;
-  /** Heat added across the whole band. Validated at +70; do not raise casually. */
+  /** Heat added across the whole beam, whatever its shape. Validated at +70. */
   heat: number;
-  /** Width of the melting core, in columns. Raises Focus. */
+  /** BAND ONLY. Width of the melting core, in columns. Raises Focus. */
   focusCols: number;
   /** Extra heat inside the core, on top of `heat`. Pushes sand past melting. */
   focusHeat: number;
+  /**
+   * BLOB ONLY. Radius of the scorching disc, in HEX RINGS, inclusive — r=2 is 5 tiles
+   * across and 19 tiles in area. This is the severity dial and the first-class GM knob:
+   * the measured radius table lives in `.wiki/specs/2915cb06-1_contract-and-beam.md`.
+   *
+   * Every figure below is from `anvil` — the beam-only world, so the beam is the only
+   * thing standing between a tile and a live out-rule — at 240×144, seed 20260729,
+   * 1200 days, with the track held fixed and radius the only variable.
+   *
+   * ★ What it buys is COVERAGE, and coverage SATURATES. r=2 delivers 10,623 tile-days
+   * per purge to 28.46% of the map, r=8 reaches 93.34%, and by r=12 coverage is pinned
+   * at 100.00%. Past saturation radius buys only heat with no reach behind it — r=32
+   * delivers 348,033 tile-days, 268% of a full band's 129,600, over the same 100.00% of
+   * the world, and the share of it with no live out-rule barely moves (13.90% at r=12,
+   * 13.36% at r=32). The world consumes the fraction of itself the beam reaches.
+   *
+   * ★ BELOW SATURATION THE BINDING CONSTRAINT IS INVARIANT 8, NOT THE LIVENESS TEST.
+   * A small radius does not announce itself as a broken world. At r=2 `anvil` PASSES
+   * `npm run sim`'s test 1 — entropy 0.686 against a 0.65 floor, churn 0.180% against
+   * 0.15% — while 61.56% of the world has no live out-rule and six biome families latch
+   * above the 2% limit (tundra 16.01%, forest 10.66%, grassland 6.27%, frozensea 4.78%,
+   * savanna 4.40%, desert 2.47%). A beam reaching 28% of the map moves enough
+   * composition to clear the churn floor with the other 72% frozen solid.
+   * `npm run sim:check` catches this and `npm run sim` does not, so a GM lowering the
+   * radius should be pointed at invariant 8: the smallest radius that keeps `sim:check`
+   * green on `anvil` is 8. r=4 still latches four families.
+   *
+   * The full table is in the spec cited above. Its coverage and tile-days columns agree
+   * with the numbers here to the digit — that geometry has not changed — but the table
+   * was taken before spec 2's thermal inertia landed, so its entropy, churn and
+   * invariant-8 columns sit a few tenths away from what this branch now measures.
+   */
+  radiusHexes: number;
+  /**
+   * BLOB ONLY. Radius of the melting core, in hex rings. 0 is legal and means only the
+   * centreline tile melts; the Focus flag is still raised, so the melt chemistry stays
+   * open on a world whose beam is a needle.
+   */
+  focusRadiusHexes: number;
+  /**
+   * BLOB ONLY. Amplitude of the sinusoidal track, as a FRACTION OF `height / 2` — not
+   * a row count.
+   *
+   * ★ This is a fraction on purpose and the choice is load-bearing. The golden worlds
+   * are 160×96 and the viewer's floor is a 16-row world, so an absolute-row default is
+   * correct at exactly one world size and silently wrong at every other. At 1.0 the
+   * track reaches every latitude the torus has; at 0.5 it visits a little over half the
+   * rows and the rest of the world is structurally beam-free FOREVER, because the track
+   * is periodic and retraces itself purge after purge.
+   */
+  amplitudeHalfHeights: number;
+  /**
+   * BLOB ONLY. Full sine cycles per transit. MUST BE AN INTEGER: the track starts at
+   * column 0 and ends at column W, which is column 0 again, and only a whole number of
+   * oscillations makes the two ends of the scar meet at the torus seam. A fractional
+   * count leaves a discontinuity that a player would read as a bug in the world.
+   */
+  oscillations: number;
+  /** BLOB ONLY. Phase of the sine, in turns [0,1). Slides the track's crossings. */
+  wavePhase: number;
+  /** BLOB ONLY. Row the track oscillates about. 0 is the hot equator. */
+  homeRow: number;
   /** Direction of travel. -1 sweeps the other way; the maths is symmetric. */
   direction: 1 | -1;
   /** Day the first purge begins. Lets two beams on one world be out of phase. */
   phaseDays: number;
 }
 
+/**
+ * ★ THE SHIPPED DEFAULTS ARE THE ORCHESTRATOR'S CHOICE, NOT THE USER'S.
+ *
+ * The user asked to set beam radius per world and declined to pick a preset size, so
+ * `radiusHexes` is a knob with a measured table behind it rather than a tuned constant.
+ * What is defaulted here is the smallest set of numbers that reproduces the validated
+ * worlds' VERDICTS and composition — r=16 / focus 4 / 9 oscillations / full amplitude
+ * keeps `anvil` and `crucible` on the same liveness verdicts with the same biome counts
+ * (11 and 13) as the band prototype they replace — and it should be read as "the shape
+ * that does not change the world", not as "the right severity".
+ *
+ * It does NOT reproduce the band's exact numbers, and the spec's prediction that it
+ * would hold to three decimal places was falsified by the measurement. Band → blob r=16
+ * at 240×144, seed 20260729, 1200 days: `anvil` entropy 0.743 → 0.740 and churn
+ * 1.208% → 1.197%, `crucible` entropy 0.749 → 0.749 but churn 3.483% → 3.559%, a real
+ * +0.076 pp rather than rounding.
+ */
 const SOLAR_BEAM_DEFAULTS: SolarBeamParams = {
   transitDays: 60,
   cycleDays: 360,
+  shape: 'blob',
   widthCols: 8,
   heat: 70,
   focusCols: 2,
   focusHeat: 45,
+  radiusHexes: 16,
+  focusRadiusHexes: 4,
+  amplitudeHalfHeights: 1,
+  oscillations: 9,
+  wavePhase: 0,
+  homeRow: 0,
   direction: 1,
   phaseDays: 0,
 };
 
-interface BeamState {
+interface BeamBandState {
+  readonly shape: 'band';
   /** Leading column of the gaze this day. */
   readonly centre: number;
 }
+
+/**
+ * The day's ARC, not the day's point — see `SweptArc`, whose geometry this is.
+ *
+ * The beam was the first consumer of the travelling disc and is no longer the only one;
+ * the curve, the sampling rate and the bounding box now live in `SinusoidTrack` /
+ * `SweptArc` / `arcDistance` so that a storm and a sun cannot disagree about the shape
+ * of a sinusoid.
+ */
+interface BeamBlobState extends SweptArc {
+  readonly shape: 'blob';
+}
+
+type BeamState = BeamBandState | BeamBlobState;
 
 /**
  * The existing sweep+beam, generalised into a cycle.
@@ -469,9 +1019,37 @@ interface BeamState {
 export class SolarBeam extends WorldCycle<BeamState> {
   readonly params: SolarBeamParams;
 
+  /** Sub-centres sampled per day along the arc. Blob only; set in `onBind`. */
+  private substeps = 1;
+  /** The track the blob traverses. Constant for the life of the world. */
+  private track: SinusoidTrack = FLAT_TRACK;
+
   constructor(key = 'beam', params: Partial<SolarBeamParams> = {}) {
     super('solarbeam', key);
     this.params = { ...SOLAR_BEAM_DEFAULTS, ...params };
+  }
+
+  /**
+   * The beam's track and the resolution its arc is sampled at.
+   *
+   * Both come from the shared travelling-disc geometry — see `SinusoidTrack` and
+   * `trackSubsteps`. At the shipped 240×144 / 45d / 9 oscillations that is 5.3 columns
+   * plus 90.5 rows a day, so 96 sub-centres.
+   */
+  protected override onBind(): void {
+    const { transitDays, amplitudeHalfHeights, oscillations, wavePhase, homeRow, direction } =
+      this.params;
+    this.track = {
+      width: this.width,
+      height: this.height,
+      startCol: 0,
+      direction,
+      amplitudeHalfHeights,
+      oscillations,
+      wavePhase,
+      homeRow,
+    };
+    this.substeps = trackSubsteps(this.track, transitDays, BEAM_MAX_SUBSTEPS);
   }
 
   /** True while a purge is crossing the world. Between purges the beam is dormant. */
@@ -483,27 +1061,79 @@ export class SolarBeam extends WorldCycle<BeamState> {
 
   dayState(day: number): BeamState | null {
     if (!this.active(day)) return null;
-    const { cycleDays, transitDays, phaseDays, direction } = this.params;
+    const { cycleDays, transitDays, phaseDays, direction, shape } = this.params;
     const intoPurge = mod(day - phaseDays, cycleDays);
-    const travelled = (intoPurge / transitDays) * this.width * direction;
-    return { centre: mod(Math.floor(travelled), this.width) };
+    if (shape === 'band') {
+      const travelled = (intoPurge / transitDays) * this.width * direction;
+      return { shape: 'band', centre: mod(Math.floor(travelled), this.width) };
+    }
+    // The day's arc, from p to p + dp. `p` is NOT wrapped: the last day of a transit
+    // ends at exactly p=1, i.e. column 0 again, which is how the scar's two ends meet
+    // at the seam.
+    const arc = sweepArc(
+      this.track,
+      intoPurge / transitDays,
+      1 / transitDays,
+      this.substeps,
+      this.params.radiusHexes,
+    );
+    return { shape: 'blob', ...arc };
   }
 
-  affect(state: BeamState, out: CycleEffect, col: number, _row: number): void {
-    const delta = Math.abs(wrapDelta(col - state.centre, this.width));
-    if (delta >= this.params.widthCols) return;
+  affect(state: BeamState, out: CycleEffect, col: number, row: number): void {
+    if (state.shape === 'band') {
+      const delta = Math.abs(wrapDelta(col - state.centre, this.width));
+      if (delta >= this.params.widthCols) return;
+      out.heat += this.params.heat;
+      out.flags |= CycleFlag.Beam;
+      if (delta < this.params.focusCols) {
+        out.heat += this.params.focusHeat;
+        out.flags |= CycleFlag.Focus;
+      }
+      return;
+    }
+
+    const best = arcDistance(state, col, row, this.width, this.height, this.params.radiusHexes);
+    if (best === Infinity) return;
+
     out.heat += this.params.heat;
     out.flags |= CycleFlag.Beam;
-    if (delta < this.params.focusCols) {
+    if (best <= this.params.focusRadiusHexes) {
       out.heat += this.params.focusHeat;
       out.flags |= CycleFlag.Focus;
     }
   }
 
-  /** Leading column of the beam today, or -1 when dormant. */
+  /**
+   * Leading column of the beam today, or -1 when dormant.
+   *
+   * For a blob this is the column its centre has reached, which is the honest answer to
+   * "where is the sun" and NOT the answer to "is my tile under it" — under a blob those
+   * are different questions and only `forecast` answers the second.
+   */
   column(day: number): number {
     const s = this.dayState(day);
-    return s === null ? -1 : s.centre;
+    if (s === null) return -1;
+    if (s.shape === 'band') return s.centre;
+    return Math.round(s.xs[s.xs.length - 1]!) % this.width;
+  }
+
+  /**
+   * Where the beam is today: the leading sub-centre for a blob, or the band's centre
+   * column with `row: -1` — a band occupies every row of its columns, so there is no
+   * row to give and inventing one would be worse than saying so.
+   *
+   * `null` when the beam is dormant.
+   */
+  position(day: number): { col: number; row: number } | null {
+    const s = this.dayState(day);
+    if (s === null) return null;
+    if (s.shape === 'band') return { col: s.centre, row: -1 };
+    const last = s.xs.length - 1;
+    return {
+      col: Math.round(s.xs[last]!) % this.width,
+      row: Math.round(s.ys[last]!) % this.height,
+    };
   }
 
   /** Day the next purge begins. The cycle-level question, closed form. */
@@ -528,19 +1158,31 @@ export class SolarBeam extends WorldCycle<BeamState> {
    * Scanning the real `affect` cannot drift from the simulation by construction, and
    * the cost is a few hundred arithmetic ops on an API call.
    *
-   * The horizon is widened to one full cycle plus one transit, which is provably
-   * enough for every column, so the beam is always forecastable however long its cycle.
+   * The horizon is widened to one full cycle plus one transit. Under a BAND that is
+   * provably enough for every column, because the band spans every row and its centre
+   * visits every column once a transit.
+   *
+   * ★ IT PROVES NOTHING UNDER A BLOB, and the difference is not a gap in the proof —
+   * it is a property of the world. The blob's track is periodic: it retraces exactly the
+   * same tiles every purge, forever. A tile the track misses is missed for the life of
+   * the world, so no horizon however long will find an arrival, and `null` is not a
+   * failure to answer but the correct answer. `World.daysUntilBeam` returns `Infinity`
+   * for such a tile for the same reason, and callers must handle "never" rather than
+   * treating it as "not yet". Measured on the shipped track over a 40 × 24 sample of a
+   * 240×144 world: at r=2, 682 of 960 tiles (71.0%) never get an arrival, and at the
+   * default r=16 it is 0 of 960. Radius is what buys coverage — see the table in the spec.
    */
   override forecast(
     col: number,
     row: number,
     fromDay: number,
     horizonDays: number = DEFAULT_FORECAST_HORIZON,
+    view: WorldView = DETACHED_VIEW,
   ): CycleForecast | null {
     const { cycleDays, transitDays } = this.params;
     if (transitDays <= 0 || cycleDays <= 0) return null;
     const need = Math.ceil(cycleDays + transitDays) + 2;
-    return super.forecast(col, row, fromDay, Math.max(horizonDays, need));
+    return super.forecast(col, row, fromDay, Math.max(horizonDays, need), view);
   }
 
   override expectedIntervalDays(): number {
@@ -731,7 +1373,12 @@ export class Seasons extends WorldCycle<SeasonState> {
     // does — the tropics have the strongest wet/dry cycle on any real world.
     const wWet = this.wetWeight[row]!;
 
-    out.heat += heatAmplitude * w * state.heatPhase;
+    // ★ `ambientHeat`, NOT `heat`. A season is a months-long forcing that a coastline
+    // may legitimately lag behind, and this is the only channel World's thermal filter
+    // low-passes — so this one line is what actually delivers "the temperature changes
+    // more slowly around water". The acute channel is for purges and eruptions, whose
+    // whole effect is a single-day spike that a lag would erase.
+    out.ambientHeat += heatAmplitude * w * state.heatPhase;
     out.moisture += moistureAmplitude * wWet * state.moisturePhase;
 
     // The named seasons are gated on latitude, not scaled by it. Multiplying the phase
@@ -1305,6 +1952,653 @@ export class Monsoon extends WorldCycle<MonsoonState> {
 }
 
 // ===========================================================================
+// Weather — storms that travel, morph against the ground, and die
+// ===========================================================================
+
+/**
+ * ★ THE MOISTURE BUDGET: `peak moisture × radius² ≤ 300`.
+ *
+ * `CycleEffect.moisture` is an additive push on a diffusion target whose retention is
+ * 0.9998 (`world.ts`), so a sustained, spatially broad push has a steady-state gain of
+ * roughly 1/(1-r) — enormous on temperate land. This is the mistake that produced
+ * `Seasons.moistureAmplitude`'s warning (at 10 the desert belt vanished for half of
+ * every year) and `Monsoon.moisture`'s (at 26 a monsoon did not water a region, it
+ * flooded the planet), and a storm is the same shape of push with a smaller footprint.
+ *
+ * The ok/over boundary was measured between M·R² = 343 and 384, across three independent
+ * radii, against `still` land-moisture mean 67.1 and monsoon-only 78.4:
+ *
+ *     R=7  M=7   343   land mean 77.6   ok
+ *     R=7  M=8   392   land mean 78.7   OVER
+ *     R=14 M=1   196   land mean 74.1   ok
+ *     R=14 M=2   392   land mean 79.2   OVER
+ *     R=28 M=1   784   land mean 85.0   OVER
+ *
+ * BREADTH DOMINATES STRENGTH — doubling the radius costs four times the budget — which
+ * is why the ceiling is on the product and not on either number. 300 is the largest
+ * round figure inside the measured boundary.
+ *
+ * Enforced in `Weather.onBind`, not merely documented, because it is a constraint on a
+ * PAIR of parameters and a per-parameter min/max cannot express it: R=14, M=1 is legal
+ * and R=14, M=2 is not.
+ */
+export const WEATHER_MOISTURE_BUDGET = 300;
+
+/** Ceiling on sub-centres per day for a storm's arc. See `trackSubsteps`. */
+const WEATHER_MAX_SUBSTEPS = 512;
+
+/**
+ * Probe points sampled under the track, per day of a storm's life, as offsets in
+ * (column, row) scaled by `sampleSpread`.
+ *
+ * Seven: the centre and a ring of six. Deliberately a FIXED set that does not depend on
+ * the storm's current type — the type is derived from what these probes see, so a
+ * type-dependent probe geometry would be a classifier reading its own output.
+ */
+const WEATHER_PROBES: readonly (readonly [number, number])[] = [
+  [0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, -1], [-1, 1],
+];
+
+export interface WeatherParams {
+  /**
+   * Concurrent storm TRACKS. Each one rolls independently, per epoch, whether it
+   * carries a storm — so this is the population size, not the storm count.
+   */
+  storms: number;
+  /** Mean days between storms ON ONE TRACK. */
+  meanIntervalDays: number;
+  /** Mean days a storm lives. Actual lives run 0.6× to 1.4× this. */
+  durationDays: number;
+  /**
+   * Radius of a RAIN disc, in hex rings. Every other type is this scaled by a fixed
+   * factor (see `STORM_PROFILES`) — a gale is broader than a rain cell and a rain cell
+   * is the one that carries moisture, which is what the budget above is about.
+   */
+  radiusHexes: number;
+  /**
+   * ★ THE LOOKBACK, IN DAYS, AND THE WHOLE ARCHITECTURE RESTS ON IT.
+   *
+   * A storm's type is a function of the terrain under the last K days of its track,
+   * sampled from the grid AS IT IS TODAY. Nothing is accumulated: the storm's entire
+   * condition is recomputable from (seed, day, world-now), which is what lets a freshly
+   * bound cycle handed only the day-N grid reproduce the live simulation exactly.
+   *
+   * An accumulator was measured and is unimplementable against this contract — a cold
+   * resolver never converges on a day-by-day one (max |Δwetness| 0.045 → 0.256 with NO
+   * decay in K). What K buys is REACH, not compute, and the reach is stated at the
+   * SHIPPED K because that is the only one any preset runs: at K=12, 160×96 `garden`,
+   * 600 days, the oldest day still inside the window sits a mean 50.9 tiles from today's
+   * centre and the furthest of its seven probes 56.3 — better than a third of the world's
+   * width, i.e. a storm's type is decided by ground it left a region or two ago. Raising
+   * it to 20 stretches those to 61.1 and 69.2.
+   */
+  lookbackDays: number;
+  /** Spread of the seven terrain probes, in hexes from the track centre. */
+  sampleSpread: number;
+  /** Water fraction under the lookback at or above which a storm is a DOWNPOUR. */
+  wetHeavyRain: number;
+  /** ... at or above which it RAINS. */
+  wetRain: number;
+  /** ... at or above which it is HEAVY CLOUD. */
+  wetHeavyCloud: number;
+  /** ... at or above which it is CLOUD. Below it the storm has dried into wind. */
+  wetCloud: number;
+  /** ... below which the wind is a GALE. Nothing wet has been under it for a while. */
+  wetWind: number;
+  /**
+   * Fraction of the seven probes that must be stone or lava for a day to count as
+   * lethal. "The storm dies completely when passing another terrain."
+   */
+  deathFraction: number;
+  /**
+   * Consecutive lethal days that kill a storm outright. Death is DERIVED from the same
+   * bounded lookback rather than stored: an absorbing `alive` flag cannot be inferred
+   * from a grid, and one was measured wrong for 2 of 3 storms at small K. Once the run
+   * is complete the storm is gone for the rest of its life, because the scan runs from
+   * the storm's birth and its life is bounded.
+   */
+  deathDays: number;
+  /** PEAK moisture at the centre of a downpour. See `WEATHER_MOISTURE_BUDGET`. */
+  rainMoisture: number;
+  /** Heat removed at the centre of a rain or cloud disc. Shade, not winter. */
+  cloudHeatDrop: number;
+  /** Whole sine cycles per traverse. A storm rolls 1..this many. */
+  oscillations: number;
+  /** Amplitude of the sinusoidal track, as a fraction of `height / 2`. */
+  amplitudeHalfHeights: number;
+  /** Offsets the whole storm calendar. Two weather cycles can be out of phase. */
+  phaseDays: number;
+}
+
+/**
+ * ★ THESE NUMBERS ARE MEASURED, NOT CHOSEN. The wet thresholds are set against a world
+ * whose sea share is 22–24% (22.2% `still`, 22.4% `garden`, 24.2% `crucible` at day 1500
+ * on this tree), so a storm sitting over open water reads 1.0, one working a coastline
+ * reads ~0.4, and one over a continental interior reads 0. The rain shares that produces
+ * are on `CYCLE_CATALOGUE`'s weather entry; spec `2915cb06-4`'s table is the same
+ * measurement taken before rivers existed.
+ */
+const WEATHER_DEFAULTS: WeatherParams = {
+  storms: 6,
+  meanIntervalDays: 90,
+  durationDays: 40,
+  radiusHexes: 7,
+  lookbackDays: 12,
+  sampleSpread: 4,
+  wetHeavyRain: 0.55,
+  wetRain: 0.3,
+  wetHeavyCloud: 0.14,
+  wetCloud: 0.05,
+  wetWind: 0.01,
+  /**
+   * ★ 3 OF THE 7 PROBES, FOR 2 CONSECUTIVE DAYS, AND BOTH NUMBERS ARE MEASURED.
+   * Mortality as a share of scheduled storm-days, `garden`, 160×96, 1000 days,
+   * RE-MEASURED on this tree (rivers moved every one of these; see below):
+   *
+   *     fraction 0.60 / 3 days   0.0%       0.60 / 2 days    0.0%
+   *     fraction 0.45 / 3 days   0.0%       0.45 / 2 days    0.9%
+   *     fraction 0.30 / 3 days   0.6%       0.30 / 2 days    5.3%
+   *     fraction 0.15 / 3 days   6.3%       0.15 / 2 days   18.8%
+   *
+   * At 0.45 and above, five of seven probes must land on hard ground at once and no
+   * world produces a mass that solid — storms essentially never die. What 0.30/2 buys is
+   * a death rate that reads the WORLD rather than the parameter. Measured at these
+   * defaults over 1500 days: `still` kills 0.3% of storm-days, `garden` (fault ridges)
+   * 5.1%, and `crucible` (beam scars, basalt fields, live lava) 23.7%, against hard
+   * ground of 0.4% / 3.9% / 8.2% of the map at day 1500. Storms die where the world is
+   * hard, which is the whole fiction, and no line of code says so.
+   *
+   * ★ THE WHOLE TABLE FELL WHEN SPEC 5 LANDED, AND THAT IS THE POINT OF IT BEING A
+   * READING. Spec 4 measured 10.2% at 0.30/2 and 9.2% on `garden` at 1500 days on the
+   * 22-biome tree; the same runs on this one give 5.3% and 5.1%. Nothing about the
+   * mechanism moved — the ordering across presets, the cliff above 0.45 and the
+   * world-reading property all reproduce — and `still` and `crucible` barely shifted at
+   * all (0.3% and 24.8% → 23.7%). What moved is the world `garden` grows, which is
+   * exactly the kind of thing a spec is allowed to move and this comment is not allowed
+   * to keep quoting from a tree that no longer exists.
+   */
+  deathFraction: 0.3,
+  deathDays: 2,
+  /**
+   * 6 at radius 7 is M·R² = 294, just inside the 300 ceiling — the same order as
+   * `Monsoon.moisture` (10) and `Seasons.moistureAmplitude` (4), and for the same
+   * reason. A rain disc at 10 and radius 28 reached a land-moisture mean of 97.0 and
+   * reproduced the desert-belt failure exactly.
+   */
+  rainMoisture: 6,
+  cloudHeatDrop: 5,
+  oscillations: 3,
+  amplitudeHalfHeights: 0.7,
+  phaseDays: 0,
+};
+
+/** The six types a storm can be, in ladder order from wettest to driest. */
+type StormType = 'heavyrain' | 'rain' | 'heavycloud' | 'cloud' | 'wind' | 'heavywind';
+
+interface StormProfile {
+  /** Radius, as a multiple of `radiusHexes`. A rain cell is tight; a gale is broad. */
+  readonly radiusScale: number;
+  /** Peak moisture, as a fraction of `rainMoisture`. */
+  readonly moistureScale: number;
+  /**
+   * Peak heat DROP, as a fraction of `cloudHeatDrop`. Always ≥ 0 — cloud and rain shade
+   * the ground and nothing here warms it.
+   *
+   * ★ WIND IS 0 AND MUST STAY 0. Wind as a heat term is a whole new climate channel and
+   * it is explicitly out of scope; what wind does is dry and abrade, through
+   * `dryingBoost` in `biomes.ts`, which is the existing idiom for exactly that.
+   */
+  readonly heatScale: number;
+  readonly flags: number;
+  readonly label: string;
+}
+
+/**
+ * ★ A HEAVY TYPE ALWAYS RAISES ITS LIGHT PARTNER, and heavy rain also raises `Storm`.
+ * That is what lets every rule that already means "a downpour is happening" keep working
+ * unchanged, and it is why nothing in `biomes.ts` has to test for a pair of flags.
+ */
+const STORM_PROFILES: Readonly<Record<StormType, StormProfile>> = {
+  heavyrain: {
+    radiusScale: 1,
+    moistureScale: 1,
+    heatScale: 1,
+    flags: CycleFlag.Rain | CycleFlag.HeavyRain | CycleFlag.Storm,
+    label: 'a downpour',
+  },
+  rain: {
+    radiusScale: 0.85,
+    moistureScale: 0.5,
+    heatScale: 0.6,
+    flags: CycleFlag.Rain,
+    label: 'rain',
+  },
+  heavycloud: {
+    radiusScale: 1.4,
+    moistureScale: 0,
+    heatScale: 1,
+    flags: CycleFlag.Cloud | CycleFlag.HeavyCloud,
+    label: 'heavy overcast',
+  },
+  cloud: {
+    radiusScale: 1.15,
+    moistureScale: 0,
+    heatScale: 0.5,
+    flags: CycleFlag.Cloud,
+    label: 'cloud',
+  },
+  wind: {
+    radiusScale: 1.3,
+    moistureScale: 0,
+    heatScale: 0,
+    flags: CycleFlag.Wind,
+    label: 'wind',
+  },
+  heavywind: {
+    radiusScale: 1.6,
+    moistureScale: 0,
+    heatScale: 0,
+    flags: CycleFlag.Wind | CycleFlag.HeavyWind,
+    label: 'a gale',
+  },
+};
+
+const STORM_LADDER: readonly StormType[] = [
+  'heavyrain', 'rain', 'heavycloud', 'cloud', 'wind', 'heavywind',
+];
+
+/** One storm resolved for one day: the arc it sweeps and what it is doing. */
+interface Storm extends SweptArc {
+  readonly radius: number;
+  readonly moisture: number;
+  readonly heatDrop: number;
+  readonly flags: number;
+  /** Water fraction under the lookback that produced this type. For diagnostics. */
+  readonly wetness: number;
+}
+
+interface WeatherState {
+  readonly storms: readonly Storm[];
+}
+
+/**
+ * A small population of storms, each a disc on a sinusoid whose TYPE, RADIUS and
+ * SURVIVAL are functions of the terrain it has crossed.
+ *
+ * ---------------------------------------------------------------------------
+ * ★ THIS IS THE FIRST CYCLE THAT READS THE WORLD, AND WHAT THAT COSTS
+ * ---------------------------------------------------------------------------
+ * `cycles.ts`'s contract says a cycle is a pure function of (worldSeed, key, day), and
+ * defends it with lazy fast-forwarding of unobserved regions. `ARCHITECTURE.md` decision
+ * 10.1 already abandoned that property for terrain, so the price was paid before this
+ * cycle existed — but a world with weather in its cycle set genuinely cannot have a
+ * region resolved on contact without stepping it. `readsWorld` is how a caller finds
+ * out; see decision `0015`.
+ *
+ * What survives, and it is the whole design, is **bounded lookback over the current
+ * grid**. The storm's TRACK is a pure function of seed and day. Its TYPE is derived by
+ * sampling the grid under the last K days of that pure track. Its DEATH is derived by
+ * scanning its own bounded life for a run of lethal days. There is no accumulated state
+ * anywhere, so the storm's whole condition is recomputable from (seed, day, world-now) —
+ * which is why a freshly bound cycle handed only the day-N grid reproduces the live
+ * simulation's storms exactly rather than approximately.
+ *
+ * ---------------------------------------------------------------------------
+ * ★ WHAT `forecast()` MAY PROMISE
+ * ---------------------------------------------------------------------------
+ * WHEN is fact and WHAT is a projection, and the split is structural rather than lucky:
+ * the storm population, its schedule and its track are pure functions of (seed, day), so
+ * the only thing that can move an arrival is a storm dying before it gets there — which
+ * shows up as an arrival that never happens, never as one on the wrong day.
+ *
+ * MEASURED ON THIS TREE — re-run after spec 5, because the grid these forecasts project
+ * from is the grid rivers changed. 400 tiles on a 20×20 lattice over a 160×96 world,
+ * forecasting at day 300 over a 150-day horizon against the day-300 grid frozen, then
+ * simulating those 150 days:
+ *
+ *                                garden+weather      crucible+weather
+ *     predicted a hit, got one        395                  395
+ *     predicted a hit, none came        0  (0.0%)            0  (0.0%)
+ *     predicted nothing, hit came       0                    0
+ *     ARRIVAL DAY exact             395/395 (100%)       395/395 (100%)
+ *     FLAGS exact                   386/395 (97.7%)      394/395 (99.7%)
+ *     mean lead time                 38.5 d               38.4 d
+ *
+ * ★ THE ERROR IS ALL IN THE LONG LEADS, WHICH IS EXACTLY WHERE A PROJECTION SHOULD FAIL.
+ * Split by lead time on `garden`: at 0–9 days 93/93 flags exact, at 10–29 days 111/111,
+ * and at 30–149 days 182/191 (95.3%). A forecast a week out is effectively a fact; one
+ * two months out is a guess about terrain that has not happened yet. `basis` reports
+ * `projected` for all of them and the API layer should surface that rather than implying
+ * a precision that only the near end has.
+ *
+ * (The spec predicted 99.2% / 92.3% / 9.6% from the prototype. WHEN came out better and
+ * so did WHAT; the no-show rate came out far lower because the shipped storm population
+ * is dense enough that the mean lead is 38 days rather than the horizon, and most
+ * forecast storms simply do not live long enough to die first. The conclusion the
+ * prototype's numbers supported — over-promises, never under-promises — reproduces
+ * exactly: zero unpredicted arrivals on both presets.)
+ */
+export class Weather extends WorldCycle<WeatherState> {
+  readonly params: WeatherParams;
+  /** Probe offsets pre-scaled by `sampleSpread`, so the lookback allocates nothing. */
+  private probeCols = new Int32Array(0);
+  private probeRows = new Int32Array(0);
+  /** Per-type radius, rounded, and clamped to what the torus can hold. */
+  private radii = new Float64Array(STORM_LADDER.length);
+  private maxRadius = 0;
+  /** Probes that must be lethal for a day to count against a storm's life. */
+  private killNeed = 1;
+
+  constructor(key = 'weather', params: Partial<WeatherParams> = {}) {
+    super('weather', key);
+    this.params = { ...WEATHER_DEFAULTS, ...params };
+  }
+
+  /**
+   * Size the discs, check the moisture budget, and pre-scale the probes.
+   *
+   * Two constraints are resolved here and they are resolved differently on purpose.
+   *
+   * ★ THE MOISTURE BUDGET THROWS. `rainMoisture × radius² > 300` is a parameter error a
+   * GM made, it is independent of the world, and a world built with it is a world whose
+   * desert belt quietly disappears — the failure `Seasons.moistureAmplitude` and
+   * `Monsoon.moisture` both shipped once. Naming it is strictly better than running it.
+   *
+   * ★ THE TORUS FIT CLAMPS. `2r + 1 < min(width, height)` is what makes
+   * `hexDistanceWithin`'s y-wrap exact; past it a disc wraps onto itself and stops being
+   * a travelling thing at all. The beam is held to the same rule and REJECTS, because a
+   * beam's radius is its severity dial and silently shrinking it would misreport the
+   * severity of the world. A storm's radius is one of six derived sizes, a world too
+   * small to hold a gale is a world with no room for weather in it either way, and a
+   * throw here would turn "16×16 with the garden preset" into an error page. So the
+   * discs are held to what the torus can carry and the constraint is stated in the
+   * catalogue note.
+   */
+  protected override onBind(): void {
+    const p = this.params;
+    const spread = Math.max(1, Math.round(p.sampleSpread));
+    this.probeCols = new Int32Array(WEATHER_PROBES.length);
+    this.probeRows = new Int32Array(WEATHER_PROBES.length);
+    for (let i = 0; i < WEATHER_PROBES.length; i++) {
+      this.probeCols[i] = WEATHER_PROBES[i]![0] * spread;
+      this.probeRows[i] = WEATHER_PROBES[i]![1] * spread;
+    }
+    this.killNeed = Math.max(
+      1,
+      Math.min(WEATHER_PROBES.length, Math.ceil(p.deathFraction * WEATHER_PROBES.length)),
+    );
+
+    // The budget is checked on the radius the GM ASKED FOR, before the torus clamp:
+    // a world small enough to shrink the disc would otherwise silently make an illegal
+    // configuration legal, and the same cycle set would then be rejected or not
+    // depending on the size of the world it was dropped into.
+    for (const type of STORM_LADDER) {
+      const profile = STORM_PROFILES[type];
+      const asked = Math.max(0, Math.round(p.radiusHexes * profile.radiusScale));
+      const moisture = p.rainMoisture * profile.moistureScale;
+      const budget = moisture * asked * asked;
+      if (budget > WEATHER_MOISTURE_BUDGET) {
+        throw new Error(
+          `weather "${this.key}": ${type} would push ${moisture.toFixed(1)} moisture over a ` +
+            `radius of ${asked}, i.e. M·R² = ${budget.toFixed(0)}, above the measured ceiling ` +
+            `of ${WEATHER_MOISTURE_BUDGET}. Moisture is an additive push on a diffusion ` +
+            'target with 0.9998 retention, so its steady-state gain is ~1/(1-r) and breadth ' +
+            'costs four times what strength does: the ok/over boundary was measured between ' +
+            'M·R² = 343 and 384 across three independent radii, and past it the desert belt ' +
+            'stops existing. Lower rainMoisture or radiusHexes.',
+        );
+      }
+    }
+
+    // Torus fit. `hexDistanceWithin` guarantees an exact y-wrap only under half the
+    // height, and a disc as wide as the world is a global offset rather than a storm.
+    const fit = Math.max(0, Math.floor((Math.min(this.width, this.height) - 2) / 2));
+    this.maxRadius = 0;
+    for (let i = 0; i < STORM_LADDER.length; i++) {
+      const profile = STORM_PROFILES[STORM_LADDER[i]!];
+      const r = Math.min(fit, Math.max(0, Math.round(p.radiusHexes * profile.radiusScale)));
+      this.radii[i] = r;
+      if (r > this.maxRadius) this.maxRadius = r;
+    }
+  }
+
+  /** ★ The declaration decision `0007` exists for. This cycle's day depends on terrain. */
+  override get readsWorld(): boolean {
+    return true;
+  }
+
+  /** How many epochs back a storm born earlier may still be alive today. */
+  private get lookbackEpochs(): number {
+    return epochLookback(this.params.durationDays * 1.4);
+  }
+
+  /**
+   * Everything about a storm that does NOT depend on the world: when it is born, how
+   * long it lives, and the curve it traverses. Pure in (stream, epoch, source).
+   */
+  private plan(epoch: number, source: number): {
+    birth: number;
+    life: number;
+    track: SinusoidTrack;
+    vigour: number;
+  } {
+    const p = this.params;
+    const birth =
+      epoch * EPOCH_DAYS +
+      Math.floor(epochRoll(this.stream, epoch, source, 31) * EPOCH_DAYS) +
+      p.phaseDays;
+    const life = Math.max(1, Math.round(p.durationDays * (0.6 + 0.8 * epochRoll(this.stream, epoch, source, 32))));
+    // Whole oscillations only, for the reason decision `0008` records: a track that
+    // starts at one column and ends at the same column meets itself at the torus seam
+    // only for an integer count, and a fractional one leaves a visible discontinuity.
+    const osc = 1 + Math.floor(epochRoll(this.stream, epoch, source, 36) * Math.max(1, p.oscillations));
+    return {
+      birth,
+      life,
+      vigour: epochRoll(this.stream, epoch, source, 37),
+      track: {
+        width: this.width,
+        height: this.height,
+        startCol: Math.floor(epochRoll(this.stream, epoch, source, 33) * this.width),
+        direction: epochRoll(this.stream, epoch, source, 34) < 0.5 ? 1 : -1,
+        amplitudeHalfHeights: p.amplitudeHalfHeights,
+        oscillations: osc,
+        wavePhase: epochRoll(this.stream, epoch, source, 35),
+        homeRow: Math.floor(epochRoll(this.stream, epoch, source, 38) * this.height),
+      },
+    };
+  }
+
+  /**
+   * Resolve one storm against the grid: is it still alive, and if so what is it?
+   *
+   * Walks the storm's life from its birth to today, sampling the seven probes under the
+   * track on each of those days. The walk is bounded by the storm's own lifetime, and
+   * every read is of TODAY's grid — nothing here remembers a previous day, which is the
+   * property the whole design rests on.
+   *
+   * Returns null when the storm is dead: `deathDays` consecutive days on which
+   * `killNeed` of the seven probes were stone or lava. Because the scan starts at birth,
+   * a storm that crossed a range on day 6 of its life is still dead on day 30 — a real
+   * death rather than a dormancy that wears off — without a single byte of stored state.
+   */
+  private resolve(
+    epoch: number,
+    source: number,
+    day: number,
+    view: WorldView,
+  ): Storm | null {
+    const plan = this.plan(epoch, source);
+    if (day < plan.birth || day >= plan.birth + plan.life) return null;
+
+    const { lookbackDays, deathDays } = this.params;
+    const probes = WEATHER_PROBES.length;
+    let wetSum = 0;
+    let wetDays = 0;
+    let killRun = 0;
+
+    for (let t = plan.birth; t <= day; t++) {
+      const progress = (t - plan.birth + 1) / plan.life;
+      const x = trackX(plan.track, progress);
+      const y = trackY(plan.track, progress);
+      const row0 = mod(Math.round(y), this.height);
+      // `trackX` is in `hexX` space, where an odd row sits half a column to the right;
+      // undo that before rounding to a tile or every odd-row sample is biased right.
+      const col0 = Math.round(x - 0.5 * (row0 & 1));
+
+      let wet = 0;
+      let kill = 0;
+      for (let i = 0; i < probes; i++) {
+        const cls = view.terrainAt(col0 + this.probeCols[i]!, row0 + this.probeRows[i]!);
+        if (cls & TerrainClass.Sea) wet++;
+        else if (cls & (TerrainClass.Stone | TerrainClass.Molten)) kill++;
+      }
+
+      if (kill >= this.killNeed) {
+        killRun++;
+        if (killRun >= deathDays) return null;
+      } else {
+        killRun = 0;
+      }
+
+      if (t > day - lookbackDays) {
+        wetSum += wet;
+        wetDays++;
+      }
+    }
+
+    const wetness = wetDays === 0 ? 0 : wetSum / (wetDays * probes);
+    return this.dress(plan.track, plan.birth, plan.life, day, wetness, plan.vigour);
+  }
+
+  /**
+   * Turn a water fraction into today's storm: type, radius, moisture, flags, and the
+   * arc it sweeps today.
+   *
+   * `vigour` is a per-storm constant that scales the water fraction by 0.75–1.25 before
+   * the ladder is read. It is a property of the storm, not of the world, so it adds
+   * variety without giving the classifier anything of its own making to read.
+   */
+  private dress(
+    track: SinusoidTrack,
+    birth: number,
+    life: number,
+    day: number,
+    wetness: number,
+    vigour: number,
+  ): Storm {
+    const p = this.params;
+    const w = wetness * (0.75 + 0.5 * vigour);
+    let index = STORM_LADDER.length - 1;
+    if (w >= p.wetHeavyRain) index = 0;
+    else if (w >= p.wetRain) index = 1;
+    else if (w >= p.wetHeavyCloud) index = 2;
+    else if (w >= p.wetCloud) index = 3;
+    else if (w >= p.wetWind) index = 4;
+
+    const profile = STORM_PROFILES[STORM_LADDER[index]!];
+    const radius = this.radii[index]!;
+    const substeps = trackSubsteps(track, life, WEATHER_MAX_SUBSTEPS);
+    const arc = sweepArc(track, (day - birth) / life, 1 / life, substeps, radius);
+    return {
+      ...arc,
+      radius,
+      moisture: p.rainMoisture * profile.moistureScale,
+      heatDrop: p.cloudHeatDrop * profile.heatScale,
+      flags: profile.flags,
+      wetness,
+    };
+  }
+
+  dayState(day: number, view: WorldView): WeatherState | null {
+    // ★ DETACHED. `forecast()` may run against a cycle with no world attached, and the
+    // honest answer for a world-reading cycle with no terrain to read is "nothing" —
+    // which `forecast` turns into `null` rather than a fabricated storm. Decision `0007`.
+    if (view.width === 0) return null;
+
+    const { storms, meanIntervalDays, durationDays } = this.params;
+    if (storms <= 0 || meanIntervalDays <= 0 || durationDays <= 0) return null;
+
+    const p = Math.min(0.9, EPOCH_DAYS / meanIntervalDays);
+    const epoch = Math.floor((day - this.params.phaseDays) / EPOCH_DAYS);
+    let live: Storm[] | null = null;
+
+    // Same Poisson-per-epoch shape as Tectonics and Volcanism, including the lookback
+    // so a long-lived storm born in an earlier epoch is not silently truncated.
+    for (let e = epoch - this.lookbackEpochs; e <= epoch; e++) {
+      for (let s = 0; s < storms; s++) {
+        if (epochRoll(this.stream, e, s, 30) >= p) continue;
+        const storm = this.resolve(e, s, day, view);
+        if (storm === null) continue;
+        (live ??= []).push(storm);
+      }
+    }
+    return live === null ? null : { storms: live };
+  }
+
+  affect(state: WeatherState, out: CycleEffect, col: number, row: number): void {
+    for (let i = 0; i < state.storms.length; i++) {
+      const storm = state.storms[i]!;
+      const d = arcDistance(storm, col, row, this.width, this.height, storm.radius);
+      if (d === Infinity) continue;
+      // Flags across the whole disc, magnitudes with a linear falloff: the footprint a
+      // rule sees is the footprint a person would see, and the moisture budget above is
+      // stated as a PEAK, so a falloff can only spend less of it than the ceiling.
+      const intensity = 1 - d / (storm.radius + 1);
+      out.flags |= storm.flags;
+      if (storm.moisture !== 0) out.moisture += storm.moisture * intensity;
+      // ★ ACUTE, like the monsoon's cloud cooling and unlike a season: a storm passes a
+      // tile in days, and the thermal filter would erase it. Never positive — see
+      // `StormProfile.heatScale`.
+      if (storm.heatDrop !== 0) out.heat -= storm.heatDrop * intensity;
+    }
+  }
+
+  /**
+   * Mean days between storms at one tile — an ESTIMATE, and labelled as one.
+   *
+   * Storms are Poisson in time and roughly uniform in space, so the honest form is
+   * (epoch length) / (storms per epoch × the share of the world one storm sweeps). The
+   * swept share is the arc length times the disc width, which is an over-estimate where
+   * a track crosses itself. It is the same class of statement as `Tectonics`'s row
+   * share, and like that one it is a rate rather than a date.
+   */
+  override expectedIntervalDays(): number {
+    const { storms, meanIntervalDays, durationDays, radiusHexes, amplitudeHalfHeights } =
+      this.params;
+    if (storms <= 0 || meanIntervalDays <= 0 || durationDays <= 0) return Infinity;
+    const perEpoch = storms * Math.min(0.9, EPOCH_DAYS / meanIntervalDays);
+    // Arc length of one traverse: the full width, plus the sine's own path length.
+    const arc = this.width + 2 * Math.PI * Math.abs(amplitudeHalfHeights) * (this.height / 2);
+    const swept = Math.min(1, (arc * (2 * this.maxRadius + 1)) / (this.width * this.height));
+    if (perEpoch <= 0 || swept <= 0) return Infinity;
+    return EPOCH_DAYS / (perEpoch * swept);
+  }
+
+  protected override forecastLabel(flags: number): string {
+    for (const type of STORM_LADDER) {
+      const profile = STORM_PROFILES[type];
+      // The heavy types are checked first because they carry their light partner's flag.
+      if ((flags & profile.flags) === profile.flags) return profile.label;
+    }
+    return 'weather';
+  }
+
+  override describe(): CycleDescription {
+    const { label, summary, flags } = this.catalogue;
+    return {
+      key: this.key,
+      kind: this.kind,
+      label,
+      summary,
+      periodDays: this.params.meanIntervalDays,
+      flags,
+      params: { ...this.params },
+    };
+  }
+}
+
+// ===========================================================================
 // The catalogue — what exists, before any world does
 // ===========================================================================
 
@@ -1339,11 +2633,18 @@ export interface CycleParamDef {
    */
   readonly type: 'number' | 'integer' | 'boolean' | 'choice';
   /** Read from the kind's `*_DEFAULTS` constant, never written by hand. */
-  readonly default: number | boolean;
+  readonly default: number | boolean | string;
   /** Advisory-but-enforced bounds. Outside them the cycle stops meaning anything. */
   readonly min?: number;
   readonly max?: number;
-  readonly choices?: readonly number[];
+  /**
+   * Legal values for a `choice`. STRINGS ARE ALLOWED and are not cosmetic: the beam's
+   * `shape` is a genuinely non-numeric choice — `band` and `blob` are two different
+   * geometries, not two points on a scale — and encoding it as 0/1 would put a number
+   * in front of a GM that means nothing. `CycleDescription.params` already permitted
+   * strings; this is the catalogue side of the same widening.
+   */
+  readonly choices?: readonly (number | string)[];
   readonly unit?: string;
   /** One line on what the number does. Mined from the JSDoc above. */
   readonly note: string;
@@ -1357,6 +2658,12 @@ export interface CycleCatalogueEntry {
   readonly summary: string;
   /** Flags this kind can raise. The basis of the reachable-biome analysis. */
   readonly flags: readonly string[];
+  /**
+   * True when this kind's day depends on the terrain, so its forecasts are PROJECTIONS.
+   * Absent means false. Mirrors `WorldCycle.readsWorld`, and exists so the composition
+   * UI can say which of a GM's choices are schedules and which are weather.
+   */
+  readonly readsWorld?: boolean;
   readonly params: readonly CycleParamDef[];
 }
 
@@ -1374,28 +2681,44 @@ function paramDefs<P extends object>(
   return (Object.keys(notes) as (keyof P & string)[]).map((name) => ({
     name,
     ...notes[name],
-    default: defaults[name] as number | boolean,
+    default: defaults[name] as number | boolean | string,
   }));
 }
 
 const DAYS = 'days';
 const COLS = 'columns';
 const ROWS = 'rows';
+const HEXES = 'hexes';
+const TURNS = 'turns';
 
 export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
   {
     kind: 'solarbeam',
     label: 'the cleansing sweep',
     summary:
-      'Drags a band of scorching heat across every column of the world, then goes ' +
-      'dormant until the next purge. Its two knobs are not interchangeable: transit is ' +
-      'DWELL TIME (how long one tile bakes) and cycle is RECOVERY TIME. Dwell time is ' +
-      'what sterilises — on a five-cycle world a 60d transit / 360d cycle beam pushed ' +
-      'the living share down to 2% of the map, and lengthening the cycle to 480d only ' +
-      'recovered it to 8% while shortening the transit to 45d recovered it to a 13% ' +
-      'floor and a 28.4% mean. It is one of only two cycles that opens the melt ' +
-      'chemistry: without a beam or volcanism there is no route to lava, ash, basalt ' +
-      'or fertile soil.',
+      'A travelling focus of scorching heat that crosses the world once, then goes ' +
+      'dormant until the next purge. Its SHAPE decides what "crosses" means. As a blob ' +
+      '(the default) it is a hex disc tracing a sinusoid, and what it costs the world is ' +
+      'COVERAGE, not heat — and coverage saturates. On the beam-only world a radius-2 ' +
+      'disc reaches 28.46% of the map, radius 8 reaches 93.34%, and from radius 12 up it ' +
+      'is pinned at 100.00%; past that, radius buys only heat, with a radius-32 disc ' +
+      'delivering 268% of a full band\'s budget over the same 100% of the world. Below ' +
+      'saturation the thing that breaks is NOT the liveness test: at radius 2 the ' +
+      'beam-only world still passes it (entropy 0.686, churn 0.180%) while 61.56% of the ' +
+      'map has no live out-rule at all and six biome families latch. Radius is the ' +
+      'severity dial, the smallest one that keeps the transition graph healthy on a ' +
+      'beam-only world is 8, and there is a measured table behind both numbers. As a ' +
+      'band it is instead a full-height wall of columns, covering 100% of the ' +
+      'world every purge; that is the shape the original prototype was validated with ' +
+      'and the transit-as-dwell-time findings below are true only of it. Either way the ' +
+      'two time knobs are not interchangeable: transit is DWELL TIME (how long one tile ' +
+      'bakes) and cycle is RECOVERY TIME. Under a band, dwell time is what sterilises — ' +
+      'on a five-cycle world a 60d transit / 360d cycle beam pushed the living share ' +
+      'down to 2% of the map, and lengthening the cycle to 480d only recovered it to 8% ' +
+      'while shortening the transit to 45d recovered it to a 13% floor and a 28.4% mean. ' +
+      'Under a blob, radius and track length share that job with transit. It is one of ' +
+      'only two cycles that opens the melt chemistry: without a beam or volcanism there ' +
+      'is no route to lava, ash, basalt or fertile soil.',
     flags: ['beam', 'focus'],
     params: paramDefs(SOLAR_BEAM_DEFAULTS, {
       transitDays: {
@@ -1406,21 +2729,49 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
         label: 'cycle', type: 'number', min: 1, max: 5000, unit: DAYS,
         note: 'Days from one purge to the next. This is RECOVERY TIME; between purges the beam is dormant and costs nothing.',
       },
+      shape: {
+        label: 'shape', type: 'choice', choices: ['blob', 'band'],
+        note: 'blob = a travelling hex disc on a sinusoid, sized by radius. band = a full-height wall of columns covering 100% of the world every purge, the validated prototype.',
+      },
       widthCols: {
         label: 'band width', type: 'number', min: 1, max: 512, unit: COLS,
-        note: 'Width of the scorching band.',
+        note: 'BAND ONLY. Width of the scorching band. Ignored by a blob, which uses radius.',
       },
       heat: {
-        label: 'band heat', type: 'number', min: 0, max: 300,
-        note: 'Heat added across the whole band. Validated at +70; do not raise casually.',
+        label: 'beam heat', type: 'number', min: 0, max: 300,
+        note: 'Heat added across the whole beam, whatever its shape. Validated at +70; do not raise casually.',
       },
       focusCols: {
         label: 'focus width', type: 'number', min: 0, max: 512, unit: COLS,
-        note: 'Width of the melting core. Raises Focus, which is the gate for sand → lava.',
+        note: 'BAND ONLY. Width of the melting core. Raises Focus, which is the gate for sand → lava.',
       },
       focusHeat: {
         label: 'focus heat', type: 'number', min: 0, max: 300,
-        note: 'Extra heat inside the core, on top of band heat. Pushes sand past melting.',
+        note: 'Extra heat inside the core, on top of beam heat. Pushes sand past melting.',
+      },
+      radiusHexes: {
+        label: 'radius', type: 'integer', min: 0, max: 256, unit: HEXES,
+        note: 'BLOB ONLY, and the severity dial. Hex rings, inclusive — 2 is 5 tiles across. It buys COVERAGE, which saturates at 100% by radius 12; below radius 8 a beam-only world still passes the liveness test while most of it has no live out-rule, so check `npm run sim:check`, not `npm run sim`. Measured radius table in .wiki/specs/2915cb06-1_contract-and-beam.md.',
+      },
+      focusRadiusHexes: {
+        label: 'focus radius', type: 'integer', min: 0, max: 256, unit: HEXES,
+        note: 'BLOB ONLY. Radius of the melting core. 0 is legal and melts only the centreline.',
+      },
+      amplitudeHalfHeights: {
+        label: 'track amplitude', type: 'number', min: 0, max: 1,
+        note: 'BLOB ONLY. Sine amplitude as a FRACTION of half the world height. 1.0 reaches every latitude; below that the rows the track misses are beam-free forever.',
+      },
+      oscillations: {
+        label: 'oscillations', type: 'integer', min: 0, max: 64,
+        note: 'BLOB ONLY. Whole sine cycles per transit. Must be an integer or the two ends of the scar do not meet at the torus seam.',
+      },
+      wavePhase: {
+        label: 'wave phase', type: 'number', min: 0, max: 1, unit: TURNS,
+        note: 'BLOB ONLY. Phase of the sine in turns. Slides where the track crosses the equator.',
+      },
+      homeRow: {
+        label: 'home row', type: 'number', min: 0, max: 2048, unit: ROWS,
+        note: 'BLOB ONLY. Row the track oscillates about. 0 is the hot equator.',
       },
       direction: {
         label: 'direction', type: 'choice', choices: [1, -1],
@@ -1446,7 +2797,10 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
       'degrees of the ice-thaw threshold and an eighth of the world froze permanently. ' +
       'Rain amplitude is the opposite — it is tiny on purpose, and at 10 the desert ' +
       'belt vanished for half of every year (land moisture swinging 2.4–99.9, against ' +
-      '25–99 at 4).',
+      '25–99 at 4). Its heat arrives on the AMBIENT channel, so it is the one cycle a ' +
+      "tile's thermal inertia low-passes: near water the year's swing is damped and " +
+      'delayed, which is what gives a coast a maritime climate and an interior a ' +
+      'continental one. Acute cycles — the beam, eruptions, quakes — bypass that filter.',
     flags: ['heatwave', 'freeze', 'storm', 'drought'],
     params: paramDefs(SEASONS_DEFAULTS, {
       periodDays: {
@@ -1635,6 +2989,111 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
       },
     }),
   },
+  {
+    kind: 'weather',
+    label: 'the weather',
+    summary:
+      'A small population of storms, each a disc travelling a sinusoid, whose TYPE, ' +
+      'RADIUS and SURVIVAL are decided by the ground it has crossed. A system that has ' +
+      'been over open water rains; one that has been dry for a while reverts to wind; ' +
+      'one that crosses a range or a lava field two days running — three of its seven ' +
+      'ground probes on hard ground each day — DIES, and stays dead for the rest of its ' +
+      'life. How often that happens is a fact about the world rather than about this ' +
+      'cycle: at the shipped settings, over 1500 days, the terrain killed 0.3% of ' +
+      'storm-days on the no-disturbance control, 5.1% on a world with fault ridges, and ' +
+      '23.7% on one with beam scars, basalt fields and live lava — the same ordering as ' +
+      'the hard ground under them, 0.4% / 3.9% / 8.2% of the map. It is the only cycle ' +
+      'that reads the world, so its forecasts are PROJECTIONS rather than schedules — ' +
+      'though measured over 400 tiles at a 150-day horizon, WHEN is exact (395/395, mean ' +
+      'error 0.00 d, because the track is world-independent) and only WHAT degrades, ' +
+      'from 100% correct inside thirty days to 95.3% past them. It never misses an ' +
+      'arrival it did not predict. Its classifier is GEOGRAPHIC and must stay that ' +
+      'way: gated on open water it oscillates between 24.6% and 38.5% rain share across ' +
+      'five 300-day windows of a 1500-day run with no trend, and keeps all six types in ' +
+      'use (normalised type entropy 0.97); gated on moisture instead, the same storm ' +
+      'latched to 100% — it rained, the ground got wet, so it rained forever. Rain ' +
+      'moisture is tiny for the same reason the monsoon\'s is, and the ' +
+      'ceiling is on the PRODUCT: moisture × radius² must stay under 300, because ' +
+      'breadth costs four times what strength does. Wind dries and abrades; it carries ' +
+      'no heat. Be honest about what it buys — it was measured liveness-NEUTRAL against ' +
+      'the same world without it. What it adds is texture and legibility, not churn.',
+    flags: ['rain', 'heavyrain', 'wind', 'heavywind', 'cloud', 'heavycloud', 'storm'],
+    readsWorld: true,
+    params: paramDefs(WEATHER_DEFAULTS, {
+      storms: {
+        label: 'storm tracks', type: 'integer', min: 0, max: 64,
+        note: 'Concurrent storm TRACKS. Each rolls independently per epoch whether it carries a storm, so this is the population, not the storm count.',
+      },
+      meanIntervalDays: {
+        label: 'mean interval', type: 'number', min: 1, max: 5000, unit: DAYS,
+        note: 'Mean days between storms ON ONE TRACK. More tracks means more weather overall.',
+      },
+      durationDays: {
+        label: 'storm life', type: 'number', min: 1, max: 2000, unit: DAYS,
+        note: 'Mean days a storm lives; actual lives run 0.6×–1.4× this. It is also the SPEED knob — a storm crosses the world exactly once in its life, so a shorter life is a faster storm.',
+      },
+      radiusHexes: {
+        label: 'rain radius', type: 'integer', min: 0, max: 64, unit: HEXES,
+        note: 'Radius of a RAIN disc. The other five types scale off it — a gale is 1.6× as broad, a rain cell is the one that carries moisture. A disc must fit its torus (2r+1 < the smaller axis) or it wraps onto itself; discs are held to that.',
+      },
+      lookbackDays: {
+        label: 'lookback', type: 'integer', min: 1, max: 200, unit: DAYS,
+        note: '★ The window of its own track a storm classifies itself from. Nothing is accumulated — the type is recomputed from today\'s grid every day, which is what keeps the cycle resolvable from a cold start. What it costs is REACH: at the default 12 days the window\'s oldest sample sits a mean 51 tiles from the storm\'s centre, and its furthest probe 56.',
+      },
+      sampleSpread: {
+        label: 'probe spread', type: 'number', min: 1, max: 32, unit: HEXES,
+        note: 'How far the seven terrain probes sit from the track centre. Fixed, and deliberately independent of the storm\'s type: a type-dependent probe would be a classifier reading its own output.',
+      },
+      wetHeavyRain: {
+        label: 'downpour above', type: 'number', min: 0, max: 1,
+        note: 'Water fraction under the lookback at or above which the storm is a downpour. A downpour also raises the Storm flag, so every existing wet-season rule fires under it.',
+      },
+      wetRain: {
+        label: 'rain above', type: 'number', min: 0, max: 1,
+        note: 'Water fraction at or above which it rains. Against a world 22–24% sea, 0.3 means the storm has been working a coastline or better.',
+      },
+      wetHeavyCloud: {
+        label: 'heavy cloud above', type: 'number', min: 0, max: 1,
+        note: 'Water fraction at or above which the system is heavy overcast rather than rain.',
+      },
+      wetCloud: {
+        label: 'cloud above', type: 'number', min: 0, max: 1,
+        note: 'Water fraction at or above which it is cloud. Below this the storm has dried out and reverts to wind.',
+      },
+      wetWind: {
+        label: 'gale below', type: 'number', min: 0, max: 1,
+        note: 'Water fraction below which the wind is a gale — nothing wet has passed under the storm for a while.',
+      },
+      deathFraction: {
+        label: 'death fraction', type: 'number', min: 0, max: 1,
+        note: 'Share of the seven probes that must be stone or lava for a day to count as lethal. This is "the storm dies when it passes another terrain".',
+      },
+      deathDays: {
+        label: 'death days', type: 'integer', min: 1, max: 100, unit: DAYS,
+        note: 'Consecutive lethal days that kill a storm outright. Death is DERIVED by rescanning the storm\'s own bounded life, never stored — an absorbing flag cannot be inferred from a grid.',
+      },
+      rainMoisture: {
+        label: 'rain moisture', type: 'number', min: 0, max: 60,
+        note: '★ PEAK moisture at the centre of a downpour, and the ceiling is on moisture × radius², not on this alone. Over 300 the desert belt stops existing; the world refuses to build rather than run it.',
+      },
+      cloudHeatDrop: {
+        label: 'cloud cooling', type: 'number', min: 0, max: 60,
+        note: 'Heat removed under rain or cloud. Shade, not winter — and it is the ACUTE channel, because a storm passes in days and the thermal filter would erase it. Wind carries no heat at all.',
+      },
+      oscillations: {
+        label: 'max oscillations', type: 'integer', min: 1, max: 32,
+        note: 'A storm rolls between 1 and this many whole sine cycles per traverse. Whole numbers only, so a track meets itself at the torus seam.',
+      },
+      amplitudeHalfHeights: {
+        label: 'track amplitude', type: 'number', min: 0, max: 1,
+        note: 'Sine amplitude as a FRACTION of half the world height, not a row count. Each storm also picks its own home row, so the population covers every latitude even at a small amplitude.',
+      },
+      phaseDays: {
+        label: 'phase', type: 'number', min: 0, max: 5000, unit: DAYS,
+        note: 'Offsets the whole storm calendar. Two weather cycles on one world can run out of phase.',
+      },
+    }),
+  },
 ];
 
 const CATALOGUE_BY_KIND: ReadonlyMap<string, CycleCatalogueEntry> = new Map(
@@ -1660,7 +3119,8 @@ export type CycleSpec =
   | ({ kind: 'seasons'; key?: string } & Partial<SeasonsParams>)
   | ({ kind: 'tectonics'; key?: string } & Partial<TectonicsParams>)
   | ({ kind: 'volcanism'; key?: string } & Partial<VolcanismParams>)
-  | ({ kind: 'monsoon'; key?: string } & Partial<MonsoonParams>);
+  | ({ kind: 'monsoon'; key?: string } & Partial<MonsoonParams>)
+  | ({ kind: 'weather'; key?: string } & Partial<WeatherParams>);
 
 /** Build a cycle from a plain, serialisable spec. This is the GM-facing surface. */
 export function makeCycle(spec: CycleSpec): WorldCycle {
@@ -1685,6 +3145,10 @@ export function makeCycle(spec: CycleSpec): WorldCycle {
       const { kind, key, ...p } = spec;
       return new Monsoon(key ?? 'monsoon', p);
     }
+    case 'weather': {
+      const { kind, key, ...p } = spec;
+      return new Weather(key ?? 'weather', p);
+    }
     default: {
       const unknown: never = spec;
       throw new Error(`Unknown cycle kind: ${JSON.stringify(unknown)}`);
@@ -1704,11 +3168,20 @@ export const CYCLE_PRESETS: Readonly<Record<string, CycleSpec[]>> = {
   /** The validated prototype: beam only, 60d transit / 360d cycle. */
   anvil: [{ kind: 'solarbeam', transitDays: 60, cycleDays: 360 }],
 
-  /** A living world: weather and geology, no god. Gentle, and still never static. */
+  /**
+   * A living world: weather and geology, no god. Gentle, and still never static.
+   *
+   * It is the preset whose NAME was already a promise of weather, so it is the one that
+   * got it: storms travelling their own tracks, morphing against the coast and dying
+   * over the fault ridges tectonics puts there. On this world 5.1% of storm-days end in
+   * a death (1500 days, 160×96), which is the middle of the three presets and comes
+   * entirely from the ridges — the control kills 0.3%.
+   */
   garden: [
     { kind: 'seasons' },
     { kind: 'monsoon' },
     { kind: 'tectonics', meanIntervalDays: 200 },
+    { kind: 'weather' },
   ],
 
   /** Volcanic. Harsh in patches, extremely fertile between them. */
@@ -1741,6 +3214,11 @@ export const CYCLE_PRESETS: Readonly<Record<string, CycleSpec[]>> = {
     { kind: 'monsoon', phaseDays: 180 },
     { kind: 'tectonics' },
     { kind: 'volcanism' },
+    // Everything at once means everything, and this is also the preset the golden
+    // worlds are taken from — so weather being here is what puts a world-reading cycle
+    // under the determinism gate on every run rather than only under a harness.
+    // It is the harshest world for a storm: 23.7% of storm-days die on the scars.
+    { kind: 'weather' },
   ],
 };
 

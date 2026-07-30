@@ -4,21 +4,39 @@ Non-obvious pitfalls. One line per entry. Things that bit us once.
 
 - **Entropy alone does not detect a dead world.** At 22 biomes a no-disturbance control
   measured entropy 0.707 vs a living world's 0.703 — the *frozen* world scored higher (historical
-  figures, pre-re-key). Re-confirmed after the re-key: the `still` control measures entropy
-  **0.651, above the 0.65 alive threshold**, and only churn (0.05% against a required 0.15%)
-  catches it. Churn is the discriminating metric (R-005).
+  figures, pre-re-key). Re-measured 2026-07-30 at 23 biomes: the `still` control fails entropy by
+  **0.0133** (0.637 against 0.65) and churn by **66%** of its threshold (0.05% against 0.15%).
+  Churn is the discriminating metric (R-005).
+- **Every recorded entropy figure goes stale when a biome is added.** `biomeEntropy()` divides
+  by `ln(BIOME_COUNT)`, so the 23rd biome rescaled the entire history by 0.985823 — that alone
+  moved the control's failure margin from **0.0041 to 0.0133** with *nothing about the world
+  changed* (`still` has no river tiles and its golden hash is unchanged since spec 2). Note the
+  denominator **widened a failure that was already there**; it did not push a passing control
+  below the gate. Entropy's margin against `ALIVE_ENTROPY` is a fact about the taxonomy's size;
+  churn is a total-variation distance and is invariant to it. Never compare an entropy number
+  across a taxonomy change without dividing it back out — and never across a horizon change
+  either.
 - **Node strips types without checking them.** `run.ts` parsed `--beam-period` into a
   property `WorldOptions` no longer declared; it silently did nothing and the recorded numbers
   were right only by luck (defaults happened to match). Always run `tsc --noEmit`.
 - **Measure the tail, never the final frame.** A purged world oscillates, so an end-of-run
   snapshot lands at an arbitrary phase of the cycle and reports it as steady state. Both tests
   sample across the final third.
+- **A per-interval rate must carry its interval; a snapshot from outside the window is not a
+  sample.** `sweep.ts` seeded its churn comparison with the day-0 composition, so the first tail
+  sample was a ~790-day delta averaged in as a 5-day one. There was no divisor to get wrong — the
+  interval was implicit in the samples happening to be 5 days apart. The control printed
+  **0.572%** against a true **0.047%** and thereby cleared the sweep's own `churn > 0.15%` gate,
+  the one test R-005 exists to make it fail. Worst on quiet worlds, where the transient term
+  dominates. Fixed in decision `0022`; `report.ts`'s `assessStability` was never affected.
 - **Beam severity and recovery are separate knobs.** Collapsing `beamTransitDays` and
   `beamCycleDays` into one "period" makes a longer period mean a *slower* beam, baking each
   tile longer. At a single-knob 900-day period, water reached 0%.
 - **A world's cycle set determines which biomes can exist in it.** With no tectonics there is
   no path to `mountain` at all; with no volcanism and no beam, `lava`/`ash`/`basalt`/fertile
-  `soil` are unreachable. Never assume all 22 biomes are available in an arbitrary world.
+  `soil` are unreachable. Never assume all 23 biomes are available in an arbitrary world —
+  measured today, `still` reaches 20/23, `garden` 21/23, `anvil` 22/23, `kiln` and `crucible`
+  23/23.
 - ~~**`rollAt` is keyed positionally.**~~ **FIXED** (spec `495707fd`, decision `0002`). Rolls
   now key on `rule.keyHash`, derived from `<from>-><to>:<label>`. Reordering `RULES` is a no-op;
   it changes precedence only.
@@ -28,8 +46,9 @@ Non-obvious pitfalls. One line per entry. Things that bit us once.
 - **`npm run <script> --flag` silently runs something else.** npm eats flags that are not after
   `--`, so `npm run sim --days 1500 --cycles still` ran *crucible at 1200 days*. This applies to
   every script here, `npm run viewer --port 5000` included. Always
-  `npm run sim -- --days 1500`. Both `run.ts` and `server.ts` resolve flags with `indexOf`, so
-  the FIRST occurrence of a duplicated flag wins.
+  `npm run sim -- --days 1500`. Both `run.ts` and `server.ts` now resolve flags with
+  `lastIndexOf`, so the **LAST** occurrence of a duplicated flag wins — it used to be the
+  first, which meant `--days 300 --days 500` silently ran 300.
 - **Viewer metrics and CLI metrics legitimately disagree at the same day.** The viewer assesses
   the tail of a rolling 600-day window; `npm run sim` assesses the tail of the whole run. At
   day N they are computed over different evidence, so churn and entropy differ. That is not
@@ -91,13 +110,57 @@ Non-obvious pitfalls. One line per entry. Things that bit us once.
   possibility.** Do not upgrade the second into a promise.
 - **The reachability sweep is slowest for the emptiest worlds.** Cost is (unsatisfiable rules ×
   admitted flag combinations), and a rule that *can* fire exits on its first probe while one
-  that cannot must exhaust 22×22 neighbour pairs × 7 water counts × 45 heats × 21 moistures per
-  combination. Measured: all five kinds **0.2 s**, no cycles **4.7 s**, seasons + monsoon +
+  that cannot must exhaust `BIOME_COUNT²` neighbour pairs × 7 water counts × 45 heats × 21
+  moistures per combination — so it grows quadratically with the taxonomy. Measured before the
+  taxonomy reached 23: all five kinds **0.2 s**, no cycles **4.7 s**, seasons + monsoon +
   tectonics **30.8 s**. Cached per flag mask, so it is paid once per distinct vocabulary.
 - **Do not put prose in the frame header.** It rides along up to 15 times a second: adding each
   cycle's `describe()` (with its `summary`) took the header from ~600 bytes to **5,037** for
   four cycles. The client gets summaries once from `/api/meta` and the header carries only the
   specs.
+- **`npm run sim` can report a world alive while most of it is frozen solid.** Liveness is a
+  statement about the composition histogram; escapability is a statement about tiles. `anvil`
+  at beam radius 2 passes test 1 (entropy 0.676, churn 0.180%) while **61.56%** of the world
+  has no live out-rule and six biome families are latched. `npm run sim:check` invariant 8 is
+  what catches it; `npm run sim` never will. Never accept a severity/coverage change on the
+  liveness test alone. `SIMULATION.md` bug #9.
+- **Never enumerate a biome set an instrument depends on.** `sweep.ts` hand-listed
+  `[Ocean, Shallows, FrozenSea]` as "the sea" while `biomes.ts` derives `SEA` from
+  `water && !molten` — so the one instrument built to catch a one-way coastline would have
+  reported a flat sea while it drained into a biome added after that list was written. Derive
+  from the predicate. `SIMULATION.md` bug #10.
+- **Never gate a feedback on a quantity the feedback can create.** A storm classified on
+  moisture rains, which raises moisture, which classifies it as a rain storm: measured latching
+  to 100% rain share. Classified on geography (`BiomeDef.water && !molten`) it is stable.
+  Decision `0016`. Same shape as the albedo→heat→desert loop, and why evaporation is gated on
+  `waterNeighbours`, not on heat.
+- **Reach and inertia are the same knob in any nearest-neighbour diffusion.** Spatial reach
+  goes as `≈ 0.5·√(α·τ)`, so buying maritime influence several tiles inland buys a thermal
+  memory long enough to latch the polar cap. Maritime reach is therefore a per-day BFS
+  proximity field with an explicit falloff, independent of the tile's thermal inertia.
+  Decisions `0009`–`0011`.
+- **A river must be `water: false`.** `water: true` made rivers drown their own banks and
+  annihilate the biome (1.14% → 0.00%) *and* opened a +1.5 pp water ratchet in four game-years.
+  `SEA` is derived, so the flag structurally excludes rivers from every piece of coastline
+  arithmetic without any rule naming them. Decision `0019`.
+- **A render that ignores the geometry can hide a fixed point of the simulation.** The
+  ring-adjacency river predicate admits a stable 0°/120°/240° honeycomb at 1/3 density — the
+  exact widening it was written to prevent — and it was **invisible** in a naive square ASCII
+  map. It only appeared once the odd-r half-column shift was applied. Treat the map as an
+  instrument, with the same scepticism as a number. `SIMULATION.md` bug #14.
+- **`daysUntilBeam` needs a row, and `Infinity` means "never".** Under the shipped blob beam
+  the track is periodic, so a tile it misses is missed for the life of the world — 172 of 240
+  columns are never visited at row 0. The old `daysUntilBeam(col)` hardcoded row 0, harmless
+  under a band and wrong under a disc. Callers must render "never", not "not yet". Decision
+  `0008`.
+- **A number measured under one configuration is indistinguishable from a current one once it
+  is written down.** Epic `2915cb06` did this **four** times in five specs — a prototype track
+  quoted as the shipped one (twice), figures carried past the commit they were taken on, and a
+  1200-day "before" compared against a 1500-day "after". One reached GM-facing text; one nearly
+  produced a false *causal* story rather than just a wrong digit. A sequential epic invalidates
+  its own evidence at every commit boundary. Re-measure at the end in one pass, **state the
+  provenance — tree, preset, size, horizon — next to the number**, and prefer an absent number
+  to an unsourced one. `SIMULATION.md` bug #16.
 - **Omitting a cycle's `key` is not the same as sending its default.** `makeCycle` defaults the
   solarbeam key to `beam`, not `solarbeam`, and the key seeds the cycle's RNG stream — so a UI
   that "helpfully" sends an explicit key builds a *different world* from the same preset:

@@ -33,10 +33,13 @@ seeded RNG in `src/sim/rng.ts`.
 
 ## R-005: Churn is the load-bearing liveness metric, not entropy
 Scope: global
-Added: 2026-07-29 | Source: README.md#test-1-thresholds
-At 22 biomes a frozen world can score HIGHER entropy than a living one. Do not
-"simplify" the liveness test back to entropy alone. The still-cycles control MUST
-keep failing — that failure is what proves the test discriminates.
+Added: 2026-07-29 | Amended: 2026-07-30 (spec `2915cb06-6`, biome count only) | Source: README.md#test-1-thresholds
+At this taxonomy's size a frozen world can score HIGHER entropy than a living one — measured
+at 22 biomes, and the taxonomy holds **23** today. Worse, `biomeEntropy()` divides by
+`ln(BIOME_COUNT)`, so entropy's safety margin against `ALIVE_ENTROPY` moves whenever a biome
+is added or removed; churn is a total-variation distance and does not. Do not "simplify" the
+liveness test back to entropy alone. The still-cycles control MUST keep failing — that failure
+is what proves the test discriminates.
 
 ## R-006: `erasableSyntaxOnly` — no enums, no parameter properties
 Scope: global

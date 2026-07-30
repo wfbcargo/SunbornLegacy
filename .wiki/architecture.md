@@ -12,14 +12,19 @@ devDependencies, erased at runtime (decision `0004`).
 src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 ├── hex.ts        HexTorus: toroidal hex grid, neighbour offsets, index<->col/row
 ├── rng.ts        hash32 / rollAt / mulberry32 / hashString (FNV-1a over a string)
-├── biomes.ts     22 biomes + 160 transition rules + climate thresholds.
+├── biomes.ts     23 biomes + 185 transition rules + climate thresholds. SEA is DERIVED
+│                 from a predicate (water && !molten), never enumerated — see gotchas.
 │                 RuleDef (authored) and Rule (identity attached) are separate types;
 │                 a rule's roll stream comes from its content-derived keyHash (decision 0002)
 ├── cycles.ts     WorldCycle subclasses (SolarBeam, Seasons, Tectonics, Volcanism,
-│                 Monsoon), CycleSpec union, makeCycle(), CYCLE_PRESETS,
+│                 Monsoon, Weather), CycleSpec union, makeCycle(), CYCLE_PRESETS,
 │                 CYCLE_CATALOGUE (static: kind, label, summary, flags, params+defaults —
-│                 answerable before a world exists, which describe() cannot be)
-├── world.ts      World — owns biome/moisture arrays, band sweep, stepDay()
+│                 answerable before a world exists, which describe() cannot be).
+│                 A cycle may READ the world: dayState(day, view) + readsWorld, and heat
+│                 has two channels — acute `heat` and filtered `ambientHeat` (decision 0007).
+│                 SolarBeam is shape: 'band' | 'blob', defaulting to a swept disc (0008)
+├── world.ts      World — owns biome/moisture/temperature/elevation arrays, band sweep,
+│                 the per-day maritime proximity field, stepDay()
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)
 ├── run.ts        CLI entry: argv -> World -> console report
 ├── reachability.ts  PURE graph + satisfiability core: buildAdjacency, tarjan,
@@ -58,7 +63,9 @@ never its array position, so reordering `RULES` changes precedence only (decisio
 
 - **`World` is the read surface.** `world.grid` (HexTorus), `world.biome` (Uint8Array,
   one `Biome` id per tile), `world.moisture` (Float32Array), `world.day`, `world.stepDay()`.
-  Anything rendering a world reads those; nothing reaches into private fields.
+  Anything rendering a world reads those; nothing reaches into private fields. A cycle that
+  needs world state gets a narrowed `WorldView`, not the `World` (decision `0007`), and pays
+  a measured cost for it (decision `0015`).
 - **Simulation computes, callers present.** `report.ts` renders ASCII; `run.ts` parses argv;
   `src/viewer/` serves HTTP. No module under `src/sim/` that participates in stepping may do
   I/O (R-007). `run.ts`, `golden.ts`, `sweep.ts`, `diagnose.ts` and `invariants.ts` are

@@ -77,7 +77,8 @@ export interface SessionStatus {
   cycles: CycleSpec[];
   /**
    * Measured cost of one simulated day, in milliseconds — the number that makes a
-   * 480×288 world with five cycles an informed choice rather than a surprise. Wall
+   * 480×288 world with `crucible`'s six cycles an informed choice rather than a surprise
+   * (29.9 ms/day in the re-measured table in `viewer/limits.ts`). Wall
    * clock, and therefore presentation only: it is measured AROUND `stepDay`, never
    * inside it, and no seed, sample or rule can see it (R-004).
    */

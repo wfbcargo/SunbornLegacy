@@ -55,10 +55,11 @@ export const Biome = {
   Glass: 19,
   Soil: 20,
   Barren: 21,
+  River: 22,
 } as const;
 export type Biome = (typeof Biome)[keyof typeof Biome];
 
-export const BIOME_COUNT = 22;
+export const BIOME_COUNT = 23;
 
 export interface BiomeDef {
   readonly id: Biome;
@@ -117,6 +118,15 @@ export const BIOMES: readonly BiomeDef[] = [
   { id: Biome.Glass,      key: 'glass',      name: 'Glass',        glyph: '=', colour: 195, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: true,  selfHeat: 0,   materials: ['silica', 'glasslite', 'prism'] },
   { id: Biome.Soil,       key: 'soil',       name: 'Fertile Soil', glyph: '+', colour: 94,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['loam', 'humus', 'quickvine'] },
   { id: Biome.Barren,     key: 'barren',     name: 'Barren',       glyph: ',', colour: 101, water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['dust', 'gravel', 'scrap'] },
+  // ★ `water: false` IS A SAFETY PROPERTY, NOT A CLASSIFICATION PREFERENCE. See decision
+  // `0019`. A river read as sea drowns itself — a chain tile has two river neighbours, so
+  // at any bend it reads `waterNeighbours >= 3` and its own mouth rule fires — and every
+  // tile it loses becomes Shallows, which is a permanent land→sea ratchet. Measured
+  // counterfactual, 1500 days on `crucible`: river standing share 1.14% → 0.00% (the biome
+  // is annihilated) AND the water trend went from flat to +1.5 pp in four game-years.
+  // `moistureSource` must stay 0 with it: `invariants.ts` fails a source that is not water,
+  // so a half-done version is loud rather than silent.
+  { id: Biome.River,      key: 'river',      name: 'River',        glyph: '/', colour: 39,  water: false, molten: false, moistureSource: 0,   vegetated: false, stone: false, selfHeat: 0,   materials: ['silt', 'watercress', 'rivergold'] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -168,6 +178,40 @@ export interface TileContext {
    */
   readonly waterNeighbours: number;
   readonly neighbourCounts: Int32Array;
+  /**
+   * Six-bit mask of WHICH neighbour directions hold a River — bit `d` for direction `d`
+   * of `hex.ts`'s neighbour ring.
+   *
+   * ★ THE MASK, NOT THE COUNT, AND THAT IS THE WHOLE OF FINDING 2. `neighbourCounts[River]`
+   * already gives the count and the count is not enough: two river neighbours mean
+   * "a pocket beside a channel" when they sit 60° apart and "a one-tile hole IN a channel"
+   * when they do not, and those two want opposite answers. `hex.ts:14-33` walks the ring in
+   * cyclic order (E, NE, NW, W, SW, SE) at BOTH row parities, so direction `d` and
+   * `(d+1)%6` are geometrically adjacent and the distinction is exactly a bit-adjacency
+   * test on this mask. See `CHANNEL_OK`.
+   */
+  readonly riverRing: number;
+  /**
+   * River neighbours strictly HIGHER than this tile — the downhill gate.
+   *
+   * ★ THE ONLY THING THAT BOUNDS RIVER GROWTH. Undirected, "extend into a neighbour" is a
+   * branching process with mean offspring > 1: every tip forks three ways and nothing
+   * removes a direction. Measured A/B at identical rates, 900 days on `crucible`: with this
+   * gate 1.88% of the world in 193 components; without it 24.91% AND STILL CLIMBING in
+   * 3189. With decay disabled to isolate growth, 1.30% against 32.63% and a longest
+   * component of 1959 tiles. Elevation makes the process directed on a field bounded below,
+   * so every filament terminates at a local minimum or at the sea. Decision `0018`.
+   */
+  readonly upstreamRiverNeighbours: number;
+  /**
+   * Neighbours strictly LOWER than this tile — how many ways water could leave it.
+   *
+   * Static worldgen geography, like `upstreamRiverNeighbours` and for the same reason: it
+   * is read by the two nucleation rules, and a nucleation gate must not depend on anything
+   * a river can change. 0 means a local minimum, which is a tile a channel can flow INTO
+   * and never out of — a spring there is a permanent one-tile puddle, not a river.
+   */
+  readonly downhillNeighbours: number;
   /**
    * OR of every CycleFlag raised on this tile today — see cycles.ts.
    *
@@ -266,8 +310,16 @@ const idsWhere = (p: (d: BiomeDef) => boolean): Biome[] => BIOMES.filter(p).map(
  */
 export const SEA: readonly Biome[] = idsWhere((d) => d.water && !d.molten);
 
-/** Wetlands carry their own, gentler drowning rules; see invariant 3. */
-const HAND_DROWNED: Biome[] = [Biome.Marsh, Biome.Swamp];
+/**
+ * Wetlands carry their own, gentler drowning rules; see invariant 3.
+ *
+ * ★ ONE LINE, TWO EFFECTS, AND BOTH ARE REQUIRED. This list feeds `DROWNABLE` AND
+ * `SUBSIDABLE`, and River lands in both by predicate: it is `!water && !stone` and neither
+ * glacier nor ash. Each would have handed it a derived edge that its hand-written
+ * `the river widens its mouth` already covers, which is invariant 3's rate hazard exactly.
+ * Adding it here is the same edit marsh and swamp already carry, for the same reason.
+ */
+const HAND_DROWNED: Biome[] = [Biome.Marsh, Biome.Swamp, Biome.River];
 
 /**
  * Soft ground the sea can simply take. Lava is excluded (water:true) and quenches
@@ -306,7 +358,17 @@ const VEGETATED: Biome[] = idsWhere((d) => d.vegetated);
 /** Burns to ash. Living cover plus fertile soil's organic load. */
 const BURNABLE: Biome[] = [...VEGETATED, Biome.Soil];
 
-/** Takes a frost. Living cover and unconsolidated ground; tundra IS the product. */
+/**
+ * Takes a frost. Living cover and unconsolidated ground; tundra IS the product.
+ *
+ * ★ RIVER IS DELIBERATELY OUTSIDE THIS SET AND THAT IS A HAZARD, NOT A CONVENIENCE. The
+ * final clause needs `vegetated || Soil || Barren` and a river is none of them, so — unlike
+ * every other trap in this file — the predicate does NOT pick the new biome up, and a polar
+ * river would have had no cold exit at all. It is closed by a hand-written `the river
+ * freezes over` instead of by widening the predicate, because freezing a channel is a
+ * different rate from frosting a meadow (m6 here against m90 there) and folding it in would
+ * have silently made rivers the fastest-freezing thing on the map.
+ */
 const FREEZABLE: Biome[] = idsWhere(
   (d) =>
     !d.water &&
@@ -331,6 +393,88 @@ const SUBSIDABLE: Biome[] = idsWhere(
     !HAND_DROWNED.includes(d.id),
 );
 
+/**
+ * Ground a channel can cut into — the river extension fan-out.
+ *
+ * `SUBSIDABLE` PLUS THE TWO WETLANDS. "Unconsolidated ground that water can move through"
+ * is one physical property: a quake drops it below the waterline and a river cuts a bed in
+ * it. Aliasing that set inherits the Glacier, Ash and River exclusions for free, and
+ * consolidated stone is excluded by `!d.stone` — which is the right physics as well as the
+ * right bookkeeping, since a channel that could cut bedrock would run along ridgelines.
+ *
+ * ★ BUT MARSH AND SWAMP HAVE TO BE ADDED BACK, AND LEAVING THEM OUT SILENTLY KILLS THE
+ * HEALING RULE. They are excluded from `SUBSIDABLE` because they already drown by hand —
+ * a reason that has nothing to do with rivers. Meanwhile marsh and swamp are exactly what a
+ * river DECAYS INTO: `the channel silts up`, `the flow soaks away` and `the river warms to
+ * swamp` are three of its five exits. So with the plain alias, every tile a river had just
+ * lost was permanently un-rechannelable, and `the channel extends` — which is also the
+ * gap-healing rule — could never close the hole it was written to close.
+ *
+ * MEASURED with the plain alias at 1500 days, 160×96: mean river-neighbour count 1.28–1.47
+ * and 33–53% of components a single tile, against 1.56–1.92 and a few percent when healing
+ * works. The chains were fragmenting exactly as the `exactly-one-river-neighbour` predicate
+ * did before the discriminator, and for the same reason — nothing could re-close a gap.
+ */
+const CHANNELABLE: Biome[] = [...SUBSIDABLE, Biome.Marsh, Biome.Swamp];
+
+/**
+ * ★ THE GAP/POCKET DISCRIMINATOR — the six-bit river ring, resolved once at module load.
+ *
+ * Indexed by `TileContext.riverRing`; 1 where the pattern admits a new channel tile.
+ *
+ * THE RULE: admit iff there are ONE OR TWO river neighbours and they are not cyclically
+ * adjacent on the ring.
+ *
+ *   - ONE neighbour → a tip. Admitted. This is ordinary extension, and it is also what
+ *     makes the river branch: branching is not a second rule, it is this one firing on two
+ *     different neighbours of the same tip.
+ *   - TWO ADJACENT (60°) → a pocket BESIDE a straight channel. Refused. A tile alongside a
+ *     chain always touches two consecutive chain tiles, so this is what widening looks like,
+ *     and refusing it is where linearity comes from.
+ *   - TWO NON-ADJACENT (120°/180°) → a one-tile hole IN a channel. Admitted, and this is
+ *     the half that is easy to leave out. `exactly one river neighbour` alone gives chains,
+ *     but a hole left by one decay event has TWO neighbours, so the chain can never re-close
+ *     and both halves keep severing. Measured at 1500 days with the naive predicate: 534
+ *     "rivers", mean length 1.9 tiles, 25.2% isolated singletons — while the SAME growth
+ *     machinery with decay disabled produced 14 rivers of mean 32.2 and longest 131. Growth
+ *     was never the problem. A river under `exactly-one` does not decay, it DISSOLVES.
+ *   - THREE OR MORE → refused, whatever the arrangement.
+ *
+ * ★ THE POPCOUNT CAP IS NOT REDUNDANT WITH THE ADJACENCY TEST, AND LEAVING IT OUT BUILDS A
+ * DENSE PHASE. "No two neighbours adjacent" alone also admits the 0°/120°/240° arrangement,
+ * and on a hex grid that is a SUBLATTICE: there is a honeycomb pattern at 1/3 density in
+ * which every tile has exactly three mutually non-adjacent river neighbours, so the
+ * predicate admits every one of its own cells and the phase is a stable fixed point. It is
+ * not hypothetical — it is what the rule actually did. MEASURED on the largest `garden`
+ * component at 1500 days with the cap removed: 106 tiles whose river-neighbour histogram was
+ * 1:15, 2:50, **3:41**, mean 2.25, rendered as a braided honeycomb filling a region rather
+ * than a channel crossing one. Widening was supposed to be what this table prevented.
+ *
+ * The cost is exact and small: a hole at a genuine three-way confluence no longer heals.
+ * Two-way holes are the overwhelmingly common case and still do.
+ *
+ * ★ FOUR OR MORE WAS ALREADY REFUSED BY THE ADJACENCY TEST ALONE. The largest independent
+ * set on a 6-cycle is 3, so any 4 bits necessarily contain an adjacent pair — which is why
+ * the measured share of river tiles with 4+ river neighbours is 0.0% in every configuration.
+ * That part is a property of the predicate, not a rate that happened to come out small.
+ *
+ * 64 bytes, one indexed load in the hot loop. Decision `0020`.
+ */
+const CHANNEL_OK: Uint8Array = (() => {
+  const table = new Uint8Array(64);
+  for (let mask = 0; mask < 64; mask++) {
+    let count = 0;
+    let adjacent = false;
+    for (let d = 0; d < 6; d++) {
+      if ((mask & (1 << d)) === 0) continue;
+      count++;
+      if ((mask & (1 << ((d + 1) % 6))) !== 0) adjacent = true;
+    }
+    table[mask] = count >= 1 && count <= 2 && !adjacent ? 1 : 0;
+  }
+  return table;
+})();
+
 /** Expand a one-to-many rule template into concrete rules. */
 function fanOut(froms: Biome[], rule: Omit<RuleDef, 'from' | 'derived'>): RuleDef[] {
   return froms.map((from) => ({ ...rule, from, derived: true }));
@@ -352,12 +496,43 @@ const melting = (c: TileContext): boolean =>
 /** Frost widens the cold band rather than needing a second freezing rule. */
 const freezePoint = (c: TileContext): number => (has(c, CycleFlag.Freeze) ? FROZEN + 10 : FROZEN);
 
-/** Seasonal drying. Seasons already move heat and moisture; this is emphasis, not a duplicate. */
-const dryingBoost = (c: TileContext): number =>
-  has(c, CycleFlag.Heatwave | CycleFlag.Drought) ? 2 : 1;
+/**
+ * Drying pressure: the season, the wind over the tile, and the shade above it.
+ *
+ * Three independent factors multiplied, because they are three independent things and a
+ * gale in a drought under clear sky really is drier than any of them alone. Seasons
+ * already move heat and moisture directly; this is emphasis on top of that.
+ *
+ * ★ WIND'S ONLY CHANNEL INTO THE RULESET IS HERE, AND THAT IS DELIBERATE. A wind term on
+ * heat would be a whole new climate channel — a large, spatially broad, neighbour-blind
+ * heat offset — and this ruleset has been sterilised once by exactly that shape. Drying
+ * is what wind does that a rule can read: it abrades cover and takes water off the
+ * ground, and every rule this scales is land→land, so the wind cannot touch the water
+ * budget even indirectly through a coastline rule.
+ *
+ * ★ CLOUD'S ONLY CHANNEL IS THE SAME ONE, INVERTED. Shade slows drying; it does not
+ * cause anything. A suppressor cannot latch — cloud does not manufacture cloud, and the
+ * storm that carries it classifies itself on geography, never on the moisture it left
+ * behind.
+ */
+const dryingBoost = (c: TileContext): number => {
+  const season = has(c, CycleFlag.Heatwave | CycleFlag.Drought) ? 2 : 1;
+  const wind = has(c, CycleFlag.HeavyWind) ? 1.5 : has(c, CycleFlag.Wind) ? 1.25 : 1;
+  const shade = has(c, CycleFlag.HeavyCloud) ? 0.5 : has(c, CycleFlag.Cloud) ? 0.75 : 1;
+  return season * wind * shade;
+};
 
-/** Seasonal wetting: monsoon fronts, the wet season, a plume's grit rain. */
-const wettingBoost = (c: TileContext): number => (has(c, CycleFlag.Storm) ? 3 : 1);
+/**
+ * Wetting pressure: monsoon fronts, the wet season, a plume's grit rain — and now a
+ * storm's rain.
+ *
+ * A downpour raises `Storm` as well as `HeavyRain`, so it lands on the 3 that the wet
+ * season and the monsoon already use; plain rain is a smaller push at 2. Nothing had to
+ * be re-gated for the first of those, which is the point of having heavy rain raise the
+ * flag the ruleset already had a word for.
+ */
+const wettingBoost = (c: TileContext): number =>
+  has(c, CycleFlag.Storm) ? 3 : has(c, CycleFlag.Rain) ? 2 : 1;
 
 /**
  * Living neighbours — the seed bank for recovery.
@@ -410,9 +585,20 @@ function blooming(c: TileContext): boolean {
   return n[Biome.Forest]! + n[Biome.Rainforest]! + n[Biome.Bloom]! >= 4;
 }
 
-/** Standing water OR wetland — what "ocean + forest" actually touches. */
+/**
+ * Standing water OR wetland — what "ocean + forest" actually touches.
+ *
+ * ★ RIVER BELONGS HERE AND NOT IN `waterNeighbours`, AND THE TWO ARE NOT THE SAME QUESTION.
+ * `waterNeighbours` is the COASTLINE — it drives drowning, deposition, evaporation and
+ * subsidence, and a river in it is a land→sea ratchet with a river-shaped fuse (decision
+ * `0019`). This is a WETNESS reading, used only by land→land rules, so a valley floor beside
+ * a river being humid enough to close a canopy costs the water budget exactly nothing.
+ */
 function wetNeighbours(c: TileContext): number {
-  return c.waterNeighbours + c.neighbourCounts[Biome.Swamp]! + c.neighbourCounts[Biome.Marsh]!;
+  return (
+    c.waterNeighbours + c.neighbourCounts[Biome.Swamp]! + c.neighbourCounts[Biome.Marsh]! +
+    c.neighbourCounts[Biome.River]!
+  );
 }
 
 /** Dry land neighbours. The deposition side of the coastline membrane. */
@@ -553,6 +739,36 @@ const RULE_DEFS: readonly RuleDef[] = [
     from: Biome.Lava, to: Biome.Basalt, medianDays: 30, label: 'crust hardens over',
     when: () => 1,
   },
+  {
+    // ★ THE WATER SIDE OF THE SAME CONTACT, and the first water<->lava traffic in this
+    // ruleset in either direction. `quenched to glass` above hardens the LAVA tile; a
+    // flow entering the sea also fills it, and until now the sea was simply untouched
+    // by lava. Basalt, not glass: glass is what the lava tile itself becomes, and a
+    // flow entering water leaves pillow basalt.
+    //
+    // ★ DO NOT WRITE THIS AS THE MIRROR OF `quenched to glass`. That rule uses
+    // `pressure = waterNeighbours` at median 2, and the pressure term is safe there only
+    // because the lava tile is leaving anyway — it has four exits and a ~30-day
+    // unconditional backstop. The water side has no backstop, so a pressure term on it
+    // is a pure ratchet against a sea with no restoring force. The epic's prior analysis
+    // measured the symmetric version (median 2, `pressure = lavaNeighbours`) at 0.29 pp
+    // of world per game-year on `anvil` with a 6.99 pp sea drain over 30 game-years; see
+    // `.wiki/specs/2915cb06-3_water-chemistry.md` for those figures and their provenance.
+    //
+    // MEASURED AS SHIPPED, 60 game-years at 120x72: anvil 0.0270 pp/y, crucible 0.0191,
+    // kiln 0.0033, garden and still exactly 0 (no route to lava at all). Against the
+    // epic's 0.05 pp/y per-edge ceiling. `anvil` is the binding preset even though
+    // `crucible` has more lava/water contact, because anvil's gross land->sea flux is
+    // 0.134 pp/y against crucible's 0.782 — there is almost nothing to absorb the loss.
+    // Re-measure new shapes on this contact against `anvil`.
+    //
+    // It also competes with `quenched to glass` for the same contacts. Measured
+    // suppression 4.3-21.0% of quench firings, with standing lava unmoved at three
+    // decimal places on every preset — lava's other three exits and its backstop absorb
+    // it. See decision `0013`.
+    from: Biome.Shallows, to: Biome.Basalt, medianDays: 20, label: 'the flow builds new land',
+    when: (c) => (c.neighbourCounts[Biome.Lava]! >= 1 ? 1 : 0),
+  },
 
   // -- ASHFALL: the volcanic plume --------------------------------------------
   // Volcanism is the cycle that most raises churn, because its product (soil) is a
@@ -590,8 +806,11 @@ const RULE_DEFS: readonly RuleDef[] = [
     from: Biome.Mountain, to: Biome.Rock, medianDays: 600, label: 'the peak comes down',
     when: (c) => (has(c, CycleFlag.Quake) ? 1 : 0),
   },
-  // Rivers are an edge feature, not an area, so a quake does not "carve" one here —
-  // it drops soft ground below the waterline and the sea comes in. This is also the
+  // A quake does not carve a river here — it drops soft ground below the waterline and the
+  // sea comes in. (This comment used to say rivers were an edge feature and therefore out of
+  // reach of a `RuleDef`. That position is RETIRED: `Biome.River` is an area, spec
+  // `2915cb06-5` ratified it, and the ground a quake can drop is the same ground a channel
+  // can cut — which is why `CHANNELABLE` is literally `SUBSIDABLE`.) This is also the
   // erosion counterweight that keeps the coastline a two-way membrane on tectonic
   // worlds, where uplift would otherwise be a net ratchet against the sea.
   // The >= 3 is measured, not chosen for symmetry. At >= 2 this rule fires on any soft
@@ -645,6 +864,44 @@ const RULE_DEFS: readonly RuleDef[] = [
         : 0,
   },
 
+  // -- WEATHER: storms that travel, morph and die -----------------------------
+  // The `weather` cycle raises six flags and most of their effect arrives through
+  // `dryingBoost` and `wettingBoost`, which scale rules that already existed. The
+  // three below are the transitions weather is the SOLE cause of, and every one of
+  // them is land → land: a storm cannot move the coastline, so the whole cycle
+  // spends nothing from the epic's water budget except through the moisture it adds
+  // to the diffusion target.
+  //
+  // Each is gated on a flag only `weather` can raise, so `sim:check`'s reachable-core
+  // analysis stays honest — a preset with no weather does not get these edges counted
+  // as live. (Spec 3's `shallows→basalt` carries no cycle flag and made the static
+  // count slightly optimistic on quiet presets; this is the fix applied in advance.)
+  {
+    // Sand moves on the wind, and it moves toward sand: a rubble field downwind of a
+    // dune belt gets covered. `sand covers it` is the same edge by a different
+    // process — bare heat and aridity — and the two are meant to add.
+    from: Biome.Barren, to: Biome.Desert, medianDays: 18, label: 'the wind drives the sand',
+    when: (c) =>
+      has(c, CycleFlag.Wind) && c.moisture < DRY && c.neighbourCounts[Biome.Desert]! >= 1
+        ? 1 + 0.5 * c.neighbourCounts[Biome.Desert]!
+        : 0,
+  },
+  {
+    // A gale over dry scrub takes the cover off and leaves the rubble. This is the one
+    // new EDGE weather adds to the graph — savanna had no route to barren before — and
+    // it is what gives the drying ladder a fast rung that does not need a heatwave.
+    from: Biome.Savanna, to: Biome.Barren, medianDays: 22, label: 'the gale strips the scrub',
+    when: (c) => (has(c, CycleFlag.HeavyWind) && c.moisture < DRY ? 1 : 0),
+  },
+  {
+    // Desert pavement: a cloudburst on loose sand does not green it, it guts it —
+    // the fines wash out and what is left is gravel. Note this is the OPPOSITE of
+    // `oasis spreads`, which needs sustained moisture rather than one violent day,
+    // and the two compete for the same tiles exactly as they should.
+    from: Biome.Desert, to: Biome.Barren, medianDays: 25, label: 'the cloudburst guts the dune',
+    when: (c) => (has(c, CycleFlag.HeavyRain) && c.moisture > MOIST ? 1 : 0),
+  },
+
   // =========================================================================
   // THE COASTLINE — a two-way membrane
   //
@@ -683,6 +940,50 @@ const RULE_DEFS: readonly RuleDef[] = [
     // seasalt to be a regional export somewhere. At 0.15 it was neither.
     from: Biome.Shallows, to: Biome.Ocean, medianDays: 8, label: 'island erodes',
     when: (c) => (c.waterNeighbours >= 5 ? c.waterNeighbours - 4 : c.waterNeighbours >= 3 ? 0.05 : 0),
+  },
+  {
+    // Superheated water evaporates — GATED ON GEOMETRY, with heat only choosing the
+    // product. The gate is `seabed bared`'s, one line above in spirit: a cut-off pool
+    // with at most two water neighbours, baking. It dries to sand rather than to the
+    // rubble `seabed bared` leaves, because this one is slow drying under a hot sky
+    // rather than a purge boiling a seabed off in a week.
+    //
+    // ★ HEAT MUST NOT BE THE PRIMARY GATE, and this is the one place in the ruleset
+    // where that is a hard rule rather than a preference. `world.ts` gives every open-
+    // water neighbour -3.0 heat, so converting one water tile to land adds +3.0 to
+    // every remaining adjacent sea tile — +4.2 if the product is desert, which carries
+    // the albedo term. For scale, the albedo bug that sterilised a world was +2.5 per
+    // neighbour and the ice term that latched one was -0.8. A heat-gated evaporation
+    // edge is therefore a positive feedback whose loop gain is greater than one. The
+    // epic's prior analysis measured that gain — halving a world's sea gave ~3.5x MORE
+    // above-threshold exposure per REMAINING sea tile — and priced the naive version on
+    // crucible at 0.7986 pp/y (`heat > 120`, median 5), with an all-sea variant draining
+    // the ocean to 0.01% in five game-years. Those figures and their provenance are in
+    // `.wiki/specs/2915cb06-3_water-chemistry.md`; they are 10-3000x this epic's budget.
+    //
+    // Geometry is the brake because it is SELF-LIMITING: removing an isolated water
+    // tile does not manufacture more isolated water tiles, whereas removing a hot one
+    // heats its neighbours.
+    //
+    // ★ THE `<= 2` IS NOT NEGOTIABLE, AND IT IS THE ONLY THING HOLDING THIS RULE DOWN.
+    // Measured shallows population, tile-days per day at 120x72 over 10 game-years:
+    // `wn <= 2` is 0.086-0.488, `wn <= 3` is 32.5-43.0. ONE NEIGHBOUR OF RELAXATION IS
+    // 200-400x THE TARGET, because `wn == 3` is the ordinary coastal ribbon rather than
+    // a cut-off pool. Measured cost of `wn <= 3` at this same median and heat gate:
+    // 0.127 pp/y on `anvil` (sea 25.0% -> 19.8% over 60 game-years) against a 0.05
+    // per-edge ceiling; at `heat >= 62` it is 0.211 and `anvil` reaches 14.8%. Heat and
+    // median are nearly free inside `wn <= 2` and ruinous outside it.
+    //
+    // Median 8 rather than 20: measured 0.0199 pp/y on `crucible` (the worst preset)
+    // against the 0.05 ceiling, where m20 gave 0.0098 and m3 gave 0.0473 — m3 is 95% of
+    // the ceiling, so 8 is the largest round median with real margin. It also matches
+    // the idiom: `seabed bared` is the sibling rule at this same geometry gate, at 5.
+    //
+    // Shallows only. An `Ocean` tile with <= 2 water neighbours has >= 4 land
+    // neighbours and is already being filled by `bay silts up`; giving deep water a
+    // direct route to desert would add a second, faster ratchet on the same tiles.
+    from: Biome.Shallows, to: Biome.Desert, medianDays: 8, label: 'the shallows bake dry',
+    when: (c) => (c.waterNeighbours <= 2 && c.heat >= SCORCHING ? 1 : 0),
   },
   ...fanOut(DROWNABLE, {
     to: Biome.Shallows, medianDays: 14, label: 'sea takes it',
@@ -799,6 +1100,153 @@ const RULE_DEFS: readonly RuleDef[] = [
     // standing water but keeps the humidity closes over into canopy.
     from: Biome.Swamp, to: Biome.Rainforest, medianDays: 14, label: 'canopy closes over',
     when: (c) => (c.moisture > WET && c.heat > 56 && c.heat < 82 && c.waterNeighbours <= 2 ? 1 : 0),
+  },
+
+  // =========================================================================
+  // RIVERS
+  //
+  // A river is an AREA — a valley one tile wide at minimum, not a stream drawn on the
+  // edge between two tiles. Spec `2915cb06-5` ratified that after the alternative was
+  // costed: an edge layer needs a parallel `Uint8Array(n*3)`, a second ruleset type, a
+  // second `evaluateTile`, a second satisfiability probe and a second SCC checker — and it
+  // still could not answer "a heated river becomes a swamp", because a swamp is an area.
+  // A `Mountain` tile is already a range; a `River` tile is a river valley.
+  //
+  // ★ THE RATE STRUCTURE IS THE OPPOSITE OF `silt builds`, AND THAT IS WHY IT IS SAFE.
+  // Growth pressure here scales with the number of TIPS (a tile needs exactly the right
+  // ring pattern to be admitted) while decay scales with the number of TILES. `silt builds`
+  // scaled its growth with the AREA of the growing phase, which is why relaxing one `>= 4`
+  // to `>= 3` there drained every ocean on the map. Expected filament length is
+  // `L* = 3·p_g/p_d`, which is O(1) in world size: a bigger world gets more rivers, not
+  // longer ones.
+  //
+  // ★ SET ABUNDANCE WITH SPRING DENSITY, NEVER WITH THE SPREAD MEDIAN. Standing share is
+  // nucleation × lifetime × length, and BOTH lifetime and length go as `1/p_d` — so share
+  // goes as `1/p_d²` and a slow-decay configuration needs >3000 days even to equilibrate.
+  // The two m12000 nucleation rules below are the linear, safe dial. The m6 spread median is
+  // the hyperbolic one. Long trunk rivers cost quadratically more standing share.
+  // =========================================================================
+
+  // -- Nucleation: two springs, so a world does not need ice to have rivers ----
+  // ★ NEITHER SPRING READS MOISTURE, AND THAT IS THIS EPIC'S OWN STANDING CONSTRAINT
+  // APPLIED TO ITSELF: never gate a feedback on a quantity the feedback can create. A river
+  // pushes `+2` into its neighbours' moisture diffusion target (`world.ts`), so a spring
+  // gated on `moisture > SOAKED` is a river manufacturing its own nucleation sites.
+  //
+  // MEASURED with that gate in place, 160×96, `garden`, 50-day trailing means — the river
+  // and the marsh it springs from climb TOGETHER while the sea stays flat, which is the
+  // signature of an internal loop rather than a coastline problem:
+  //
+  //     day        500    1000    1500    2000    2500    3000    3500    4000
+  //     river     2.30%   3.06%   5.82%   4.23%   5.01%   6.36%   6.23%   9.47%
+  //     marsh     7.66%   7.28%  14.33%   5.80%  10.96%  12.12%   7.80%  13.63%
+  //     sea      23.23%  23.52%  24.23%  24.20%  23.60%  23.67%  23.49%  23.37%
+  //
+  // Both gates below are now HEAT and GEOGRAPHY only. A river changes neither: it carries
+  // `selfHeat: 0` and appears in no term of `heatAt`, and it cannot manufacture bedrock —
+  // its five exits are swamp, marsh, barren, tundra and shallows, none of them stone. The
+  // residual `river → marsh → river` path survives, but with the amplifier gone its gain is
+  // ~0.002 river tiles per river tile, against the ~1.0 that would be a ratchet.
+  {
+    // Glacial meltwater, on the same `GLACIAL + 4` gate as `the ice retreats` — a river
+    // starts where the ice is LEAVING, not where it is deepest. `riverRing === 0` keeps
+    // this a nucleation rule rather than a second, uncontrolled growth rule: a spring rises
+    // where there is no channel yet, and everything after that is `the channel extends`.
+    from: Biome.Glacier, to: Biome.River, medianDays: 12000, label: 'meltwater cuts a channel',
+    when: (c) =>
+      c.heat > GLACIAL + 4 && c.riverRing === 0 && c.downhillNeighbours >= 2 ? 1 : 0,
+  },
+  {
+    // The non-glacial spring: a valley head between bedrock outcrops, which is where a
+    // water table actually daylights. Without it a world with no cold band — and `garden`
+    // is very nearly one — would have no rivers at all, and the whole biome would be a
+    // property of the polar preset rather than of the world.
+    //
+    // `>= 2` rather than `>= 1` is what makes this a valley HEAD rather than any wetland
+    // that happens to touch a rock, and it is the clause that carries the geographic
+    // scarcity the moisture test used to supply.
+    from: Biome.Marsh, to: Biome.River, medianDays: 12000, label: 'a spring rises',
+    when: (c) =>
+      stoneNeighbours(c) >= 2 && c.riverRing === 0 && c.downhillNeighbours >= 2 ? 1 : 0,
+  },
+
+  // -- Extension: the chain, and the ONLY unbounded-looking rule in the file ---
+  // Two gates, and neither is optional. `CHANNEL_OK` decides the SHAPE (a chain, not a
+  // blob, and a hole that can heal) and `upstreamRiverNeighbours` decides the DIRECTION.
+  // Removing the second turns this into an undirected branching process with mean
+  // offspring above one: measured 24.91% of the world and still climbing, against 1.88%
+  // with the gate in. See `TileContext.upstreamRiverNeighbours`.
+  ...fanOut(CHANNELABLE, {
+    to: Biome.River, medianDays: 6, label: 'the channel extends',
+    when: (c) => (CHANNEL_OK[c.riverRing]! === 1 && c.upstreamRiverNeighbours >= 1 ? 1 : 0),
+  }),
+
+  // -- Exits ------------------------------------------------------------------
+  {
+    // ★ THE RULE THE SPEC WAS WRITTEN FOR: "rivers that are heated turn into swamps."
+    // A heatwave doubles it, which is the one place the calendar reaches this family.
+    from: Biome.River, to: Biome.Swamp, medianDays: 90, label: 'the river warms to swamp',
+    when: (c) => (c.heat > 60 ? (has(c, CycleFlag.Heatwave) ? 2 : 1) : 0),
+  },
+  {
+    from: Biome.River, to: Biome.Barren, medianDays: 90, label: 'the river runs dry',
+    when: (c) => (c.moisture < DRY ? dryingBoost(c) : 0),
+  },
+  {
+    // The cold exit, hand-written because `FREEZABLE`'s predicate does not reach a river —
+    // see that set. m90 rather than the fan-out's m6: a channel carries latent heat and
+    // does not skin over the way a meadow frosts.
+    from: Biome.River, to: Biome.Tundra, medianDays: 90, label: 'the river freezes over',
+    when: (c) => (c.heat < freezePoint(c) ? (has(c, CycleFlag.Freeze) ? 2 : 1) : 0),
+  },
+  {
+    // The mouth widens. ★ THIS IS THE ONLY LAND→SEA EDGE THE WHOLE BIOME ADDS, so it is the
+    // only line here that spends from the epic's water budget, and it deliberately carries
+    // NO pressure term. `coast drowns` and `ground subsides` both scale on
+    // `waterNeighbours` and can afford to because they sit inside a two-way membrane with
+    // deposition on the other side; a river has no deposition edge at all, so a pressure
+    // term on it would be a pure ratchet.
+    //
+    // ★ THE `>= 4` IS MEASURED, NOT CHOSEN FOR SYMMETRY, AND IT IS WHAT BRINGS THIS EDGE
+    // INSIDE BUDGET. At `>= 3` and this same median the edge cost 0.0523 pp/y on `garden`,
+    // 0.0791 on `kiln` and 0.0642 on `crucible` over 60 game-years at 120×72 — over the
+    // epic's 0.05 pp/y per-edge ceiling on all three. `wn == 3` is the ordinary coastal
+    // ribbon rather than a river mouth, which is the same thing `the shallows bake dry`
+    // found one neighbour lower down. Geometry is the brake here for the reason it is
+    // everywhere else on this coastline: removing a nearly-enclosed river tile does not
+    // manufacture more nearly-enclosed river tiles.
+    from: Biome.River, to: Biome.Shallows, medianDays: 20, label: 'the river widens its mouth',
+    when: (c) => (c.waterNeighbours >= 4 ? 1 : 0),
+  },
+  {
+    // ★ THE TEMPERATE DECAY TERM, AND LEAVING IT OUT IS A DESIGN DEFECT RATHER THAN A
+    // MISSING FEATURE. It is the exact complement of `the river warms to swamp` above, so
+    // the two never both apply and their combined rate is m90 rather than a doubled one —
+    // the same construction `silt builds` / `mangrove takes hold` uses on the coastline.
+    //
+    // Without it a temperate river's ONLY exit was the m300 backstop below, which sets
+    // `L* = 3·p_g/p_d = 3 × (ln2/6) / (ln2/300) = 150` tiles. MEASURED with that structure
+    // at 160×96, river share by day, `crucible`: 1.29% (d400), 2.68 (d1200), 3.51 (d2000),
+    // 5.00 (d3200), 5.51 (d4000) — climbing at day 4000, i.e. not an equilibrium at all.
+    // `garden` did the same, 0.79 → 3.33. At m90 the ratio is 12 and `L*` is ~35, which is
+    // what makes the standing share settle instead of accumulate.
+    from: Biome.River, to: Biome.Marsh, medianDays: 90, label: 'the channel silts up',
+    when: (c) => (c.heat <= 60 ? 1 : 0),
+  },
+  {
+    // The unconditional backstop, and the same device lava's `crust hardens over` uses. It
+    // is what makes River structurally escapable rather than escapable-if-the-climate-
+    // cooperates: `invariants.ts` check 6 asks whether a biome can be left with NO cycle
+    // flags raised at all, and a channel whose only exits were climate-gated would be a
+    // trap on exactly the worlds that grew the most of it. Last in the bucket so the
+    // climate-specific exits above get first refusal.
+    //
+    // A second hand-written `river → marsh` beside the one above, deliberately: they are
+    // two different processes at two rates, exactly as `bloom → forest` carries both
+    // `bloom fades` (m5) and `the bloom passes` (m30). Distinct labels mean distinct keys
+    // and therefore distinct roll streams — see `ruleKey`.
+    from: Biome.River, to: Biome.Marsh, medianDays: 300, label: 'the flow soaks away',
+    when: () => 1,
   },
 
   // =========================================================================
@@ -965,24 +1413,29 @@ const RULE_DEFS: readonly RuleDef[] = [
     // Badlands is the EROSION product of stone under drought, where desert is the
     // ACCUMULATION product of sand. That is the whole distinction, and it is what
     // finally gives rock and mountain a dry decay path that is not barren.
+    //
+    // A gale joins the wet season and the dry season on this gate rather than getting
+    // a rule of its own: the three badlands rules are ONE physical process — bare rock
+    // being worked on by something violent — and adding a fourth parallel edge would
+    // halve their carefully ordered medians rather than widen their causes.
     from: Biome.Rock, to: Biome.Badlands, medianDays: 55, label: 'the stone gullies',
     when: (c) =>
       c.moisture < 30 && c.heat > 40 && c.heat < 95 && stoneNeighbours(c) >= 1
-        ? (has(c, CycleFlag.Storm | CycleFlag.Drought) ? 4 : 1)
+        ? (has(c, CycleFlag.Storm | CycleFlag.Drought | CycleFlag.HeavyWind) ? 4 : 1)
         : 0,
   },
   {
     from: Biome.Mountain, to: Biome.Badlands, medianDays: 90, label: 'the slopes strip',
     when: (c) =>
       c.moisture < 30 && stoneNeighbours(c) >= 1
-        ? (has(c, CycleFlag.Storm | CycleFlag.Drought) ? 4 : 1)
+        ? (has(c, CycleFlag.Storm | CycleFlag.Drought | CycleFlag.HeavyWind) ? 4 : 1)
         : 0,
   },
   {
     from: Biome.Basalt, to: Biome.Badlands, medianDays: 110, label: 'the flow gullies',
     when: (c) =>
       c.moisture < 30 && c.heat > 40
-        ? (has(c, CycleFlag.Storm | CycleFlag.Drought) ? 4 : 1)
+        ? (has(c, CycleFlag.Storm | CycleFlag.Drought | CycleFlag.HeavyWind) ? 4 : 1)
         : 0,
   },
   {
@@ -1108,6 +1561,55 @@ export const RULES: readonly Rule[] = RULE_DEFS.map((r) => {
   return { ...r, key, keyHash: hashString(key) };
 });
 
+// ---------------------------------------------------------------------------
+// THE FLUX LEDGER — an exact per-rule firing counter, off by default.
+//
+// `sweep.ts` measures the sea as a STOCK, at decade marks. That is blind to gross
+// flux by construction: two edges moving 5 pp/game-year in opposite directions net
+// to zero and the stock never moves. This epic adds water<->land edges whose whole
+// job is to be small, so "the sea share barely changed" is not evidence that a new
+// edge is safe — it is exactly what an unsafe edge looks like next to a compensating
+// one. The ledger is what turns "net drift" into "which rule did it".
+//
+// ★ WHY A GETTER AND NOT A COUNTER IN `evaluateTile`. The hot loop must not grow a
+// branch it does not need, and more importantly the instrument must not be able to
+// change the arithmetic it is measuring. `world.ts` reads `rule.to` at exactly one
+// place and only after the roll has already been won, so a getter on `to` IS the
+// firing count, with no test, no extra state read, and no way to perturb the dice.
+// Verified: both golden hashes are unchanged with the ledger enabled.
+// ---------------------------------------------------------------------------
+
+/** Firings per rule since the last reset, indexed by position in `RULES`. */
+export const RULE_FIRINGS = new Int32Array(RULES.length);
+
+let ledgerEnabled = false;
+
+/**
+ * Install the counting getters. Idempotent, and deliberately one-way: a diagnostic
+ * that can be turned off halfway through a run is a diagnostic that reports a number
+ * nobody can reproduce.
+ */
+export function enableFluxLedger(): void {
+  if (ledgerEnabled) return;
+  ledgerEnabled = true;
+  RULES.forEach((rule, i) => {
+    const to = rule.to;
+    Object.defineProperty(rule, 'to', {
+      get(): Biome {
+        RULE_FIRINGS[i] = RULE_FIRINGS[i]! + 1;
+        return to;
+      },
+      configurable: true,
+      enumerable: true,
+    });
+  });
+}
+
+/** Zero the counters. Call it after worldgen so the setup does not land in the window. */
+export function resetFluxLedger(): void {
+  RULE_FIRINGS.fill(0);
+}
+
 /**
  * Derived-vs-hand-written edge overlaps that are DELIBERATE.
  *
@@ -1128,6 +1630,17 @@ export const ACKNOWLEDGED_EDGE_OVERLAPS: readonly string[] = [
   `${Biome.Rock}>${Biome.Barren}`,
   `${Biome.Glass}>${Biome.Barren}`,
   `${Biome.Badlands}>${Biome.Barren}`,
+  // marsh -> river  by a SPRING (`a spring rises`, m12000, needs two stone neighbours and
+  //                  somewhere to drain)
+  //                 and by a CHANNEL reaching it (`the channel extends`, m6, needs an
+  //                  upstream river neighbour)
+  //
+  // ★ AND THESE TWO ARE MUTUALLY EXCLUSIVE BY CONSTRUCTION, so unlike the three above the
+  // combined rate is not even a sum: `a spring rises` requires `riverRing === 0` and
+  // `the channel extends` requires `CHANNEL_OK[riverRing]`, which is 0 at `riverRing === 0`.
+  // No tile can ever satisfy both on the same day. It is listed here rather than suppressed
+  // because the check's real job is to guarantee a person looked at every overlap once.
+  `${Biome.Marsh}>${Biome.River}`,
 ];
 
 /** Rules bucketed by source biome, so evaluation only considers what can apply. */
