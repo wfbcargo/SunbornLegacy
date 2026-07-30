@@ -34,6 +34,13 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 size, so `worldgenAt(seed, col, row)` as specified in
 │                 ARCHITECTURE.md#13 Phase 1 cannot reproduce a world. That is also what
 │                 lets the coarse tier sample the same continuous field at 1/8 resolution
+├── coarse.ts     the 8×8 coarse tier (ARCHITECTURE.md#4.1). The coarse world is an
+│                 ORDINARY World at width/8 × height/8 running the ordinary stepDay(),
+│                 not a second stepping loop; same seed samples the same continuous
+│                 field because the noise is grid-normalised. Cycle lengths are scaled
+│                 by the catalogue's `unit`, never a hand list. projectBiome/
+│                 projectMoisture are the materialized-region projection. Judged by
+│                 spec d53ccbb6-4, not by itself
 ├── world.ts      World — owns biome/moisture/temperature/elevation arrays, band sweep,
 │                 the per-day maritime proximity field, stepDay()
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)
