@@ -8,6 +8,7 @@ export function deriveStats(caravan: Caravan): DerivedStats {
   let mountCount = 0;
   let stationCount = 0;
   let emptySlots = 0;
+  const stationIds = new Set<string>();
 
   for (const vehicle of caravan.vehicles) {
     for (const slot of vehicle.slots) {
@@ -18,7 +19,10 @@ export function deriveStats(caravan: Caravan): DerivedStats {
       }
       if (occ.kind === OccupantKind.character) characterCount++;
       else if (occ.kind === OccupantKind.mount) mountCount++;
-      else if (occ.kind === OccupantKind.station) stationCount++;
+      else if (occ.kind === OccupantKind.station) {
+        stationCount++;
+        stationIds.add(occ.instanceId);
+      }
 
       if (
         (occ.kind === OccupantKind.mount || occ.kind === OccupantKind.character) &&
@@ -32,6 +36,11 @@ export function deriveStats(caravan: Caravan): DerivedStats {
     }
   }
 
+  let staffedStationCount = 0;
+  for (const a of caravan.assignments) {
+    if (stationIds.has(a.stationInstanceId)) staffedStationCount++;
+  }
+
   const mobile = caravan.form === Form.caravan;
   if (!mobile) ticksPerTile = null;
 
@@ -43,6 +52,7 @@ export function deriveStats(caravan: Caravan): DerivedStats {
     characterCount,
     mountCount,
     stationCount,
+    staffedStationCount,
     emptySlots,
   };
 }

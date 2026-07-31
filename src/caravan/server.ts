@@ -1,5 +1,6 @@
 /**
- * Local caravan lab — outfit slots, settle/mobilise, travel legs.
+ * Local caravan manager — outfit, settle/mobilise, travel, staffing, inventory,
+ * tile survey.
  *
  *   npm run caravan:view
  *
@@ -9,15 +10,47 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  activityProgress,
+  cancelActivity,
+  resolveActivity,
+  startSurvey,
+} from './activity.ts';
+import { skirmish } from './bridge.ts';
 import { allCatalog, catalogById, spawnFromCatalog } from './catalog.ts';
 import { chassisById } from './chassis.ts';
+import {
+  clearDeploy,
+  clearPlacement,
+  place,
+} from './deploy.ts';
+import { salvage } from './derelict.ts';
 import { deriveStats } from './derive.ts';
 import { canFit, fit, unfit } from './fit.ts';
+import { advanceNeeds, feed } from './food.ts';
+import { equip, unequip, GearSlot } from './gear.ts';
+import {
+  deposit,
+  depositRefunds,
+  LOOSE,
+  transfer,
+  withdraw,
+  type HoldTarget,
+} from './inventory.ts';
 import { commitLeg, positionAt, stallAt } from './legs.ts';
 import { emptyCaravan, makeStartingCaravan } from './loadout.ts';
-import { LAB_HEIGHT, LAB_WIDTH, neighboursOf } from './path.ts';
+import { neighboursOf } from './path.ts';
+import {
+  biomeAt,
+  makeRegion,
+  pathMaxCost,
+  serializeMap,
+  type Region,
+} from './region.ts';
+import { fertilityOf, biomeDef, passable } from './terrain.ts';
 import { mobilise, settle } from './settle.ts';
-import type { Caravan, MaterialStack, Occupant, TileCoord } from './types.ts';
+import { assign, assignmentForStation, unassign } from './staff.ts';
+import type { Caravan, Occupant, TileCoord } from './types.ts';
 
 const PORT = (() => {
   const i = process.argv.lastIndexOf('--port');
@@ -34,17 +67,18 @@ const ALLOWED = new Set([
   '/',
 ]);
 
-let session: Caravan = makeStartingCaravan('lab');
+let region: Region = makeRegion('lab');
+let session: Caravan = makeStartingCaravan('lab', region.spawn);
 let clockStep = 0;
 const bench: Occupant[] = [];
-const scrap: MaterialStack[] = [];
 
-function pushScrap(refunds: readonly MaterialStack[]): void {
-  for (const r of refunds) {
-    const existing = scrap.find((s) => s.materialId === r.materialId);
-    if (existing) existing.qty += r.qty;
-    else scrap.push({ materialId: r.materialId, qty: r.qty });
-  }
+function gridOpts() {
+  return { width: region.width, height: region.height, wrap: true as const };
+}
+
+function tileFertility(step: number): number {
+  const pos = positionAt(session, step);
+  return fertilityOf(biomeAt(region, pos.tile));
 }
 
 function pushBench(...occupants: Array<Occupant | null | undefined>): void {
@@ -82,6 +116,10 @@ function serializeOccupant(o: Occupant | null) {
     tier: o.tier ?? null,
     containerClass: o.containerClass ?? null,
     ticksPerTile: o.ticksPerTile ?? null,
+    satedUntilStep: o.satedUntilStep ?? null,
+    armor: o.armor ?? null,
+    tool: o.tool ?? null,
+    gear: o.gear ?? null,
   };
 }
 
@@ -96,6 +134,31 @@ function serializeCaravan(c: Caravan, step: number) {
     generation: c.generation,
     stats,
     position: pos,
+    assignments: c.assignments.map((a) => ({ ...a })),
+    holds: c.holds.map((h) => ({
+      stationInstanceId: h.stationInstanceId,
+      stacks: h.stacks.map((s) => ({ ...s })),
+    })),
+    loose: c.loose.map((s) => ({ ...s })),
+    production: { ...c.production },
+    activity: (() => {
+      const prog = activityProgress(c, step);
+      if (!prog.ok) return null;
+      const p = prog.progress;
+      return {
+        kind: p.kind,
+        tile: p.tile,
+        startStep: p.startStep,
+        durationTicks: p.durationTicks,
+        elapsed: p.elapsed,
+        remaining: p.remaining,
+        fraction: p.fraction,
+        done: p.done,
+      };
+    })(),
+    deploy: {
+      placements: c.deploy.placements.map((p) => ({ ...p })),
+    },
     legs: c.legs.map((l) => ({
       seq: l.seq,
       tiles: l.tiles,
@@ -109,15 +172,23 @@ function serializeCaravan(c: Caravan, step: number) {
         id: v.id,
         chassisId: v.chassisId,
         chassisName: chassis?.name ?? v.chassisId,
-        slots: v.slots.map((s) => ({
-          index: s.def.index,
-          kind: s.def.kind,
-          size: s.def.size ?? null,
-          tier: s.def.tier ?? null,
-          containerClass: s.def.containerClass ?? null,
-          label: s.def.label ?? `${s.def.kind}#${s.def.index}`,
-          occupant: serializeOccupant(s.occupant),
-        })),
+        slots: v.slots.map((s) => {
+          const occ = s.occupant;
+          const staffedBy =
+            occ?.kind === 'station'
+              ? (assignmentForStation(c, occ.instanceId)?.characterInstanceId ?? null)
+              : null;
+          return {
+            index: s.def.index,
+            kind: s.def.kind,
+            size: s.def.size ?? null,
+            tier: s.def.tier ?? null,
+            containerClass: s.def.containerClass ?? null,
+            label: s.def.label ?? `${s.def.kind}#${s.def.index}`,
+            occupant: serializeOccupant(occ),
+            staffedBy,
+          };
+        }),
       };
     }),
   };
@@ -146,14 +217,21 @@ function findFitted(instanceId: string): {
 
 function statePayload(extra?: Record<string, unknown>) {
   const pos = positionAt(session, clockStep);
+  const fert = fertilityOf(biomeAt(region, pos.tile));
+  const def = biomeDef(biomeAt(region, pos.tile));
   return {
     step: clockStep,
-    map: { width: LAB_WIDTH, height: LAB_HEIGHT },
-    neighbours: neighboursOf(pos.tile),
+    map: serializeMap(region),
+    neighbours: neighboursOf(pos.tile, gridOpts()),
+    tile: {
+      fertility: fert,
+      biome: def?.key ?? 'unknown',
+      glyph: def?.glyph ?? '?',
+      passable: def ? passable(def.id) : false,
+    },
     caravan: serializeCaravan(session, clockStep),
-    catalog: allCatalog(),
+    catalog: allCatalog().map((c) => ({ ...c })),
     bench: bench.map(serializeOccupant),
-    scrap: scrap.map((s) => ({ ...s })),
     ...extra,
   };
 }
@@ -170,11 +248,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   if (method === 'POST' && path === '/api/reset') {
     const body = JSON.parse((await readBody(req)) || '{}') as { seed?: string; empty?: boolean };
     bench.length = 0;
-    scrap.length = 0;
     clockStep = 0;
+    region = makeRegion(body.seed ?? 'lab');
     session = body.empty
-      ? emptyCaravan()
-      : makeStartingCaravan(body.seed ?? 'lab');
+      ? emptyCaravan('basic_wagon', region.spawn)
+      : makeStartingCaravan(body.seed ?? 'lab', region.spawn);
     json(res, 200, statePayload());
     return;
   }
@@ -186,7 +264,17 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return;
     }
     clockStep = Math.floor(body.step);
-    json(res, 200, statePayload());
+    const fert = tileFertility(clockStep);
+    const needs = advanceNeeds(session, clockStep, fert);
+    const survey = resolveActivity(session, clockStep);
+    json(res, 200, statePayload({
+      produced: needs.produced,
+      starved: needs.starve.starved.map((o) => o.instanceId),
+      collapsed: needs.starve.collapsed,
+      stalledForHunger: needs.stalledForHunger,
+      surveyCompleted: survey.completed,
+      surveyTile: survey.tile ?? null,
+    }));
     return;
   }
 
@@ -200,7 +288,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return;
     }
     const startStep = body.startStep ?? clockStep;
-    const r = commitLeg(session, body.tiles, startStep);
+    const cost = pathMaxCost(region, body.tiles);
+    if (!cost.ok) {
+      json(res, 400, { error: cost.reason });
+      return;
+    }
+    const r = commitLeg(session, body.tiles, startStep, {
+      ...gridOpts(),
+      terrainCost: cost.maxCost,
+    });
     if (!r.ok) {
       json(res, 400, { error: r.reason });
       return;
@@ -219,7 +315,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
   if (method === 'POST' && path === '/api/settle') {
     const body = JSON.parse((await readBody(req)) || '{}') as { step?: number };
-    const r = settle(session, body.step ?? clockStep);
+    const r = settle(session, body.step ?? clockStep, region);
     if (!r.ok) {
       json(res, 400, { error: r.reason });
       return;
@@ -229,12 +325,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
   }
 
   if (method === 'POST' && path === '/api/mobilise') {
-    const r = mobilise(session);
+    const r = mobilise(session, region, clockStep);
     if (!r.ok) {
       json(res, 400, { error: r.reason });
       return;
     }
-    pushScrap(r.refunds);
+    depositRefunds(session,r.refunds);
     pushBench(r.strippedStation);
     json(res, 200, statePayload({ lastRefunds: r.refunds }));
     return;
@@ -281,7 +377,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
             return;
           }
           occ = u.occupant;
-          pushScrap(u.refunds);
+          depositRefunds(session,u.refunds);
           pushBench(u.strippedStation);
         }
       }
@@ -332,7 +428,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
       return;
     }
     pushBench(r.occupant, r.strippedStation);
-    pushScrap(r.refunds);
+    depositRefunds(session,r.refunds);
     json(res, 200, statePayload({
       collapsed: r.collapsed,
       lastRefunds: r.refunds,
@@ -340,7 +436,285 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     return;
   }
 
+  if (method === 'POST' && path === '/api/assign') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      stationInstanceId?: string;
+    };
+    if (!body.characterInstanceId || !body.stationInstanceId) {
+      json(res, 400, { error: 'characterInstanceId and stationInstanceId are required' });
+      return;
+    }
+    const r = assign(session, body.characterInstanceId, body.stationInstanceId);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/unassign') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      stationInstanceId?: string;
+    };
+    const r = unassign(session, {
+      characterInstanceId: body.characterInstanceId,
+      stationInstanceId: body.stationInstanceId,
+    });
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload({ lastUnassign: r.assignment }));
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/deposit') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      target?: string;
+      materialId?: string;
+      qty?: number;
+    };
+    const target = parseHoldTarget(body.target);
+    if (target == null || !body.materialId || body.qty == null) {
+      json(res, 400, { error: 'target (loose|stationId), materialId, and qty are required' });
+      return;
+    }
+    const r = deposit(session, target, body.materialId, body.qty);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/withdraw') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      source?: string;
+      materialId?: string;
+      qty?: number;
+    };
+    const source = parseHoldTarget(body.source);
+    if (source == null || !body.materialId || body.qty == null) {
+      json(res, 400, { error: 'source (loose|stationId), materialId, and qty are required' });
+      return;
+    }
+    const r = withdraw(session, source, body.materialId, body.qty);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/transfer') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      from?: string;
+      to?: string;
+      materialId?: string;
+      qty?: number;
+    };
+    const from = parseHoldTarget(body.from);
+    const to = parseHoldTarget(body.to);
+    if (from == null || to == null || !body.materialId || body.qty == null) {
+      json(res, 400, { error: 'from, to, materialId, and qty are required' });
+      return;
+    }
+    const r = transfer(session, from, to, body.materialId, body.qty);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/feed') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      qty?: number;
+      step?: number;
+    };
+    if (!body.characterInstanceId) {
+      json(res, 400, { error: 'characterInstanceId is required' });
+      return;
+    }
+    const step = body.step ?? clockStep;
+    const r = feed(session, body.characterInstanceId, step, body.qty ?? 1);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/survey') {
+    const body = JSON.parse((await readBody(req)) || '{}') as { step?: number };
+    const step = body.step ?? clockStep;
+    const r = startSurvey(session, step);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/survey/cancel') {
+    const cancelled = cancelActivity(session);
+    json(res, 200, statePayload({ cancelled }));
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/deploy') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      col?: number;
+      row?: number;
+    };
+    if (
+      !body.characterInstanceId ||
+      body.col == null ||
+      body.row == null ||
+      !Number.isFinite(body.col) ||
+      !Number.isFinite(body.row)
+    ) {
+      json(res, 400, { error: 'characterInstanceId, col, and row are required' });
+      return;
+    }
+    const r = place(
+      session,
+      body.characterInstanceId,
+      Math.floor(body.col),
+      Math.floor(body.row),
+    );
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/deploy/clear') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+    };
+    if (body.characterInstanceId) {
+      const r = clearPlacement(session, body.characterInstanceId);
+      if (!r.ok) {
+        json(res, 400, { error: r.reason });
+        return;
+      }
+    } else {
+      clearDeploy(session);
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/skirmish') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      battleId?: string;
+    };
+    const r = skirmish(session, body.battleId);
+    if (!r.ok || !r.engagement) {
+      json(res, 400, { error: 'reason' in r ? r.reason : 'skirmish failed' });
+      return;
+    }
+    const eng = r.engagement;
+    const last = eng.rounds[eng.rounds.length - 1];
+    json(res, 200, statePayload({
+      skirmish: {
+        outcome: eng.outcome,
+        roundsPlayed: eng.roundsPlayed,
+        aliveA: last?.aliveA ?? 0,
+        aliveB: last?.aliveB ?? 0,
+        summary: eng.summary,
+        engagementId: eng.engagementId,
+      },
+    }));
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/equip') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      slot?: string;
+      catalogId?: string;
+    };
+    if (!body.characterInstanceId || !body.slot || !body.catalogId) {
+      json(res, 400, { error: 'characterInstanceId, slot, and catalogId are required' });
+      return;
+    }
+    if (body.slot !== GearSlot.armor && body.slot !== GearSlot.tool && body.slot !== GearSlot.gear) {
+      json(res, 400, { error: 'slot must be armor|tool|gear' });
+      return;
+    }
+    const r = equip(session, body.characterInstanceId, body.slot, body.catalogId);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/unequip') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      characterInstanceId?: string;
+      slot?: string;
+    };
+    if (!body.characterInstanceId || !body.slot) {
+      json(res, 400, { error: 'characterInstanceId and slot are required' });
+      return;
+    }
+    if (body.slot !== GearSlot.armor && body.slot !== GearSlot.tool && body.slot !== GearSlot.gear) {
+      json(res, 400, { error: 'slot must be armor|tool|gear' });
+      return;
+    }
+    const r = unequip(session, body.characterInstanceId, body.slot);
+    if (!r.ok) {
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/salvage') {
+    const body = JSON.parse((await readBody(req)) || '{}') as { instanceId?: string };
+    if (!body.instanceId) {
+      json(res, 400, { error: 'instanceId of a bench character is required' });
+      return;
+    }
+    const occ = takeBench(body.instanceId);
+    if (!occ) {
+      json(res, 400, { error: `bench character ${body.instanceId} not found` });
+      return;
+    }
+    const r = salvage(session, occ);
+    if (!r.ok) {
+      bench.push(occ);
+      json(res, 400, { error: r.reason });
+      return;
+    }
+    json(res, 200, statePayload());
+    return;
+  }
+
   json(res, 404, { error: 'not found' });
+}
+
+function parseHoldTarget(raw: string | undefined): HoldTarget | null {
+  if (!raw) return null;
+  if (raw === 'loose') return LOOSE;
+  return raw;
 }
 
 const server = createServer(async (req, res) => {
@@ -376,5 +750,5 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Caravan lab http://127.0.0.1:${PORT}`);
+  console.log(`Caravan manager http://127.0.0.1:${PORT}`);
 });

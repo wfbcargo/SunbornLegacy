@@ -1,4 +1,9 @@
+import { catalogById } from './catalog.ts';
 import { collapseOutpost, countCharacters } from './settle.ts';
+import { clearAssignmentsFor } from './staff.ts';
+import { clearDeployFor } from './deploy.ts';
+import { maybeDerelict } from './derelict.ts';
+import { detachHold, ensureHold } from './inventory.ts';
 import type {
   Caravan,
   FitResult,
@@ -60,6 +65,14 @@ export function canFit(
     };
   }
 
+  const catalog = catalogById(occupant.catalogId);
+  if (catalog?.equipSlot) {
+    return {
+      ok: false,
+      reason: `${occupant.name} is equipment — use equip(), do not fit into a chassis slot`,
+    };
+  }
+
   if (slot.def.kind === SlotKind.mount || slot.def.kind === SlotKind.wheel) {
     if (slot.def.size == null) {
       return { ok: false, reason: `${slot.def.kind} slot ${slotIndex} has no size (chassis bug)` };
@@ -101,6 +114,7 @@ export function fit(
   const vehicle = findVehicle(caravan, vehicleId)!;
   const slot = findSlot(vehicle, slotIndex)!;
   slot.occupant = occupant;
+  if (occupant.kind === OccupantKind.station) ensureHold(caravan, occupant);
   return { ok: true };
 }
 
@@ -129,10 +143,23 @@ export function unfit(
     occupant.kind === OccupantKind.character &&
     countCharacters(caravan) === 1;
 
+  if (occupant.kind === OccupantKind.station) {
+    detachHold(caravan, occupant.instanceId);
+    delete caravan.production[occupant.instanceId];
+  }
+
   slot.occupant = null;
+  clearAssignmentsFor(caravan, occupant.instanceId);
+  clearDeployFor(caravan, occupant.instanceId);
 
   if (removingLastManager) {
     const collapsed = collapseOutpost(caravan);
+    if (collapsed.occupant) {
+      detachHold(caravan, collapsed.occupant.instanceId);
+      clearAssignmentsFor(caravan, collapsed.occupant.instanceId);
+      clearDeployFor(caravan, collapsed.occupant.instanceId);
+    }
+    maybeDerelict(caravan);
     return {
       ok: true,
       occupant,
@@ -142,6 +169,7 @@ export function unfit(
     };
   }
 
+  maybeDerelict(caravan);
   return {
     ok: true,
     occupant,

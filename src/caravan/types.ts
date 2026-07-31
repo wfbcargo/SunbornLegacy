@@ -72,12 +72,17 @@ export interface CatalogItem {
   ticksPerTile?: number;
   /** Station build cost in scrap units — used for mobilise refunds. */
   constructionCost?: number;
+  /** Max total material qty this station can hold. Absent = not a cargo hold. */
+  cargoCapacity?: number;
+  /** If set, this item equips on a character — not fitted into chassis slots. */
+  equipSlot?: 'armor' | 'tool' | 'gear';
   blurb: string;
 }
 
 export const Form = {
   caravan: 'caravan',
   outpost: 'outpost',
+  derelict: 'derelict',
 } as const;
 export type Form = (typeof Form)[keyof typeof Form];
 
@@ -98,6 +103,12 @@ export interface Occupant {
   tier?: SlotTier;
   containerClass?: ContainerClass;
   ticksPerTile?: number;
+  /** Characters only — step when food deadline expires. */
+  satedUntilStep?: number;
+  /** Characters only — equipped catalog ids (armor / tool / gear). */
+  armor?: string;
+  tool?: string;
+  gear?: string;
 }
 
 export interface SlotState {
@@ -121,6 +132,49 @@ export interface Caravan {
   /** Bumped on replan in a later spec; stays 0 this slice. */
   generation: number;
   vehicles: Vehicle[];
+  /** Soft character→station staffing links. */
+  assignments: StationAssignment[];
+  /** One hold per fitted cargo station. */
+  holds: CargoHold[];
+  /** Stacks not in a hold (refunds without a chest, emptied on unfit). */
+  loose: MaterialStack[];
+  /** Last produce step per staffed food station instance id. */
+  production: Record<string, number>;
+  /** Stationary tile activity in progress, if any. */
+  activity: TileActivity | null;
+  /** Side-A battle deploy placements (4×6 zone). */
+  deploy: DeployBag;
+}
+
+/** Remain-here-for-N-ticks work (Session 12). Survey only this slice. */
+export interface TileActivity {
+  kind: 'survey';
+  tile: TileCoord;
+  startStep: number;
+  durationTicks: number;
+}
+
+/** One character’s cell in the Side-A deploy zone (cols 0–3, rows 0–5). */
+export interface DeployPlacement {
+  characterInstanceId: string;
+  col: number;
+  row: number;
+}
+
+export interface DeployBag {
+  placements: DeployPlacement[];
+}
+
+/** Cargo contents of one fitted station. */
+export interface CargoHold {
+  stationInstanceId: string;
+  stacks: MaterialStack[];
+}
+
+/** One character staffing one station (both must remain fitted). */
+export interface StationAssignment {
+  characterInstanceId: string;
+  stationInstanceId: string;
 }
 
 export interface TileCoord {
@@ -165,6 +219,8 @@ export interface DerivedStats {
   characterCount: number;
   mountCount: number;
   stationCount: number;
+  /** Stations that currently have an assignee. */
+  staffedStationCount: number;
   emptySlots: number;
 }
 

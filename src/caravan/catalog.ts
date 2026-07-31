@@ -6,6 +6,7 @@ import {
   type CatalogItem,
   type Occupant,
 } from './types.ts';
+import { START_SATED_UNTIL } from './food.ts';
 
 const CATALOG: CatalogItem[] = [
   {
@@ -30,7 +31,8 @@ const CATALOG: CatalogItem[] = [
     tier: SlotTier.basic,
     containerClass: ContainerClass.caravan,
     constructionCost: 20,
-    blurb: 'Basic caravan cargo hold. Mass accounting comes later.',
+    cargoCapacity: 200,
+    blurb: 'Basic caravan cargo hold. Capacity 200 qty — mass accounting later.',
   },
   {
     id: 'food_grower',
@@ -39,7 +41,7 @@ const CATALOG: CatalogItem[] = [
     tier: SlotTier.basic,
     containerClass: ContainerClass.caravan,
     constructionCost: 30,
-    blurb: 'Tray garden. Needs light and water — production later.',
+    blurb: 'Tray garden. Staffed → produces rations on a timer.',
   },
   {
     id: 'water_collector',
@@ -91,6 +93,27 @@ const CATALOG: CatalogItem[] = [
     ticksPerTile: 8,
     blurb: 'Character template — same pace as a wanderer this slice.',
   },
+  {
+    id: 'scrap_vest',
+    name: 'Scrap vest',
+    kind: OccupantKind.character,
+    equipSlot: 'armor',
+    blurb: 'Makeshift armor. Equips on a character; biases skirmish toward bastion.',
+  },
+  {
+    id: 'hand_axe',
+    name: 'Hand axe',
+    kind: OccupantKind.character,
+    equipSlot: 'tool',
+    blurb: 'Camp tool. Equips on a character.',
+  },
+  {
+    id: 'trail_kit',
+    name: 'Trail kit',
+    kind: OccupantKind.character,
+    equipSlot: 'gear',
+    blurb: 'Bedroll and kit. Equips on a character.',
+  },
 ];
 
 const BY_ID = new Map(CATALOG.map((c) => [c.id, c]));
@@ -125,5 +148,9 @@ export function spawnFromCatalog(catalogId: string, displayName?: string): Occup
     tier: item.tier,
     containerClass: item.containerClass,
     ticksPerTile: item.ticksPerTile,
+    satedUntilStep:
+      item.kind === OccupantKind.character && !item.equipSlot
+        ? START_SATED_UNTIL
+        : undefined,
   };
 }

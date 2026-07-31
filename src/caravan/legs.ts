@@ -78,7 +78,17 @@ export function commitLeg(
   caravan: Caravan,
   tiles: readonly TileCoord[],
   startStep: number,
+  opts?: {
+    width: number;
+    height: number;
+    wrap?: boolean;
+    /** Max biome move-cost along the path (≥1). */
+    terrainCost?: number;
+  },
 ): LegResult {
+  if (caravan.form === Form.derelict) {
+    return { ok: false, reason: 'cannot travel while derelict; salvage a character first' };
+  }
   if (caravan.form !== Form.caravan) {
     return { ok: false, reason: 'cannot travel while settled as an outpost; mobilise first' };
   }
@@ -90,7 +100,12 @@ export function commitLeg(
     return { ok: false, reason: 'no speed: fit a mount or character before committing a route' };
   }
 
-  const pathCheck = validatePath(tiles);
+  const grid = {
+    width: opts?.width ?? 24,
+    height: opts?.height ?? 16,
+    wrap: opts?.wrap ?? true,
+  };
+  const pathCheck = validatePath(tiles, grid);
   if (!pathCheck.ok) return pathCheck;
 
   const atStart = positionAt(caravan, startStep);
@@ -100,15 +115,17 @@ export function commitLeg(
       reason: `still travelling at step ${startStep}; wait until arrival before committing another leg`,
     };
   }
-  if (!tilesEqual(atStart.tile, tiles[0]!)) {
+  const start = tiles[0]!;
+  if (!tilesEqual(atStart.tile, start)) {
     return {
       ok: false,
       reason:
         `path must start at current tile ${atStart.tile.col},${atStart.tile.row}; ` +
-        `got ${tiles[0]!.col},${tiles[0]!.row}`,
+        `got ${start.col},${start.row}`,
     };
   }
 
+  const cost = Math.max(1, opts?.terrainCost ?? 1);
   const seq = caravan.legs.length === 0
     ? 0
     : Math.max(...caravan.legs.map((l) => l.seq)) + 1;
@@ -116,11 +133,13 @@ export function commitLeg(
   const leg: CaravanLeg = {
     seq,
     tiles: tiles.map(cloneTile),
-    ticksPerTile: stats.ticksPerTile,
+    ticksPerTile: stats.ticksPerTile * cost,
     startStep,
     state: LegState.committed,
   };
   caravan.legs.push(leg);
+  // Committing travel interrupts any stationary tile activity (full forfeit).
+  caravan.activity = null;
   return { ok: true, leg };
 }
 

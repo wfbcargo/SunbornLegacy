@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sunborn Legacy — caravan lab</title>
+  <title>Sunborn Legacy — caravan manager</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
@@ -14,59 +14,166 @@
     <header id="topbar">
       <div class="brand-block">
         <p class="brand">Sunborn Legacy</p>
-        <h1>Caravan lab</h1>
+        <h1>Caravan manager</h1>
       </div>
-      <p class="lede">Outfit, settle, and march. Click neighbouring hexes to plot a route, then commit.</p>
+      <p class="lede">Outfit, march, staff stations, and prepare for what waits on the road.</p>
       <div class="actions">
         <button id="reset-start" class="primary" type="button">Starting loadout</button>
         <button id="reset-empty" type="button">Empty chassis</button>
         <button id="settle" type="button">Settle outpost</button>
         <button id="mobilise" type="button">Mobilise</button>
-        <button id="commit-path" type="button">Commit route</button>
-        <button id="clear-path" type="button">Clear path</button>
-        <button id="stall" type="button">Stall</button>
       </div>
       <div id="stats" class="stats" aria-live="polite"></div>
     </header>
 
-    <section id="map-panel" aria-label="Travel map">
-      <div class="map-tools">
-        <label class="field">
-          <span>step <b id="step-label">0</b></span>
-          <input type="range" id="step" min="0" max="120" value="0">
-        </label>
-        <p id="path-status" class="path-status"></p>
+    <nav id="mode-nav" aria-label="Manager modes">
+      <button type="button" class="mode-tab" data-mode="map">Map</button>
+      <button type="button" class="mode-tab" data-mode="outfit">Outfit</button>
+      <button type="button" class="mode-tab" data-mode="stations">Stations</button>
+      <button type="button" class="mode-tab" data-mode="inventory">Inventory</button>
+      <button type="button" class="mode-tab" data-mode="deploy">Deploy</button>
+      <button type="button" class="mode-tab" data-mode="investigate">Investigate</button>
+    </nav>
+
+    <p id="shell-error" class="error shell-error" hidden></p>
+
+    <section id="mode-map" class="mode-panel" data-mode="map" hidden aria-label="Travel map">
+      <div class="panel-card map-panel">
+        <header class="panel-head">
+          <h2>Map</h2>
+          <p>Click neighbouring hexes to plot a route, then commit.</p>
+        </header>
+        <div class="map-tools">
+          <label class="field">
+            <span>step <b id="step-label">0</b></span>
+            <input type="range" id="step" min="0" max="120" value="0">
+          </label>
+          <p id="path-status" class="path-status"></p>
+          <div class="map-actions">
+            <button id="commit-path" type="button">Commit route</button>
+            <button id="clear-path" type="button">Clear path</button>
+            <button id="stall" type="button">Stall</button>
+          </div>
+        </div>
+        <canvas id="map" width="640" height="360"></canvas>
       </div>
-      <canvas id="map" width="640" height="360"></canvas>
     </section>
 
-    <main id="stage">
-      <aside id="catalog-rail" aria-label="Catalog">
-        <header>
-          <h2>Catalog</h2>
-          <p>Click to spawn onto the bench, then fit into a matching empty slot.</p>
-        </header>
-        <div id="catalog" class="item-list"></div>
-      </aside>
+    <section id="mode-outfit" class="mode-panel" data-mode="outfit" hidden aria-label="Outfit">
+      <main id="stage">
+        <aside id="catalog-rail" aria-label="Catalog">
+          <header>
+            <h2>Catalog</h2>
+            <p>Click to spawn onto the bench, then fit into a matching empty slot.</p>
+          </header>
+          <div id="catalog" class="item-list"></div>
+        </aside>
 
-      <section id="wagon" aria-label="Vehicle slots">
-        <header class="wagon-head">
-          <h2 id="chassis-name">Chassis</h2>
-          <p id="vehicle-id" class="mono"></p>
-        </header>
-        <div id="slot-groups"></div>
-        <p id="error" class="error" hidden></p>
-      </section>
+        <section id="wagon" aria-label="Vehicle slots">
+          <header class="wagon-head">
+            <h2 id="chassis-name">Chassis</h2>
+            <p id="vehicle-id" class="mono"></p>
+          </header>
+          <div id="slot-groups"></div>
+          <p id="error" class="error" hidden></p>
+        </section>
 
-      <aside id="bench-rail" aria-label="Bench">
-        <header>
-          <h2>Bench</h2>
-          <p>Unfitted pieces. Select one, then click an empty slot.</p>
+        <aside id="bench-rail" aria-label="Bench">
+          <header>
+            <h2>Bench</h2>
+            <p>Unfitted pieces. Select one, then click an empty slot.</p>
+          </header>
+          <div id="bench" class="item-list"></div>
+          <p id="selection" class="selection">Nothing selected.</p>
+        </aside>
+      </main>
+    </section>
+
+    <section id="mode-stations" class="mode-panel" data-mode="stations" hidden aria-label="Stations">
+      <div class="panel-card stub-layout">
+        <header class="panel-head">
+          <h2>Stations</h2>
+          <p>Assign fitted characters to fitted stations. Characters stay in their seats.</p>
         </header>
-        <div id="bench" class="item-list"></div>
-        <p id="selection" class="selection">Nothing selected.</p>
-      </aside>
-    </main>
+        <div class="stub-split">
+          <div>
+            <h3>Fitted stations</h3>
+            <div id="station-list" class="item-list"></div>
+          </div>
+          <div>
+            <h3>Character roster</h3>
+            <div id="character-roster" class="item-list"></div>
+            <p id="station-assign-status" class="selection">Select a character, then a station.</p>
+            <div class="feed-row">
+              <button id="station-unassign" type="button" hidden>Unassign selected</button>
+              <button id="feed-selected" type="button" hidden>Feed (1 ration)</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="mode-inventory" class="mode-panel" data-mode="inventory" hidden aria-label="Inventory">
+      <div class="panel-card stub-layout">
+        <header class="panel-head">
+          <h2>Inventory</h2>
+          <p>Goods in cargo holds. Select a stack, then a destination, then Transfer.</p>
+        </header>
+        <div id="inventory-panes" class="inventory-panes"></div>
+        <div class="transfer-row">
+          <button id="transfer-go" type="button" disabled>Transfer</button>
+          <label class="field compact">
+            <span>qty</span>
+            <input type="number" id="transfer-qty" min="1" value="1" style="width:4.5rem">
+          </label>
+          <span id="transfer-status" class="stub-reason">Select a source stack and a destination.</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="mode-deploy" class="mode-panel" data-mode="deploy" hidden aria-label="Deploy">
+      <div class="panel-card">
+        <header class="panel-head">
+          <h2>Deploy</h2>
+          <p>Side-A battle positions (cols 0–3). Saved on the caravan. Run a skirmish vs a canned raid.</p>
+        </header>
+        <div class="deploy-split">
+          <div>
+            <h3>Roster</h3>
+            <div id="deploy-roster" class="item-list"></div>
+            <p id="deploy-status" class="selection">Select a character, then a deploy cell.</p>
+            <div class="investigate-actions">
+              <button id="deploy-clear" type="button">Clear placements</button>
+              <button id="deploy-skirmish" type="button">Run skirmish</button>
+            </div>
+            <p id="skirmish-result" class="selection mono"></p>
+          </div>
+          <div>
+            <h3>Side A · 4×6</h3>
+            <div id="deploy-grid" class="deploy-grid" role="grid" aria-label="Deploy zone"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="mode-investigate" class="mode-panel" data-mode="investigate" hidden aria-label="Investigate">
+      <div class="panel-card investigate-card">
+        <header class="panel-head">
+          <h2>Investigate</h2>
+          <p>Remain stationary to survey the current tile. Travel, settle, or mobilise forfeits progress.</p>
+        </header>
+        <div id="investigate-tile" class="tile-card"></div>
+        <div class="investigate-actions">
+          <button id="survey-start" type="button" disabled>Start survey (100 ticks)</button>
+          <button id="survey-cancel" type="button" disabled>Cancel survey</button>
+        </div>
+        <p id="survey-reason" class="selection"></p>
+        <div class="progress-track" aria-hidden="true">
+          <div id="survey-progress" class="progress-fill" style="width:0%"></div>
+        </div>
+        <p id="survey-progress-label" class="progress-label mono">0 / 100 ticks</p>
+      </div>
+    </section>
   </div>
   <script src="/caravan.js"></script>
 </body>

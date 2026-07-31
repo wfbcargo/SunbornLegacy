@@ -1,3 +1,4 @@
+import { activityProgress } from './activity.ts';
 import { chassisById } from './chassis.ts';
 import { deriveStats } from './derive.ts';
 import { formatTile, positionAt } from './legs.ts';
@@ -21,10 +22,46 @@ export function formatCaravan(caravan: Caravan, step = 0): string {
     `Position @${step}: ${formatTile(pos.tile)}  travelling=${pos.travelling}` +
       (pos.legSeq != null ? `  leg=${pos.legSeq}  tileIndex=${pos.tileIndex}` : ''),
   );
+  const act = activityProgress(caravan, step);
+  if (act.ok) {
+    const p = act.progress;
+    lines.push(
+      `Activity: ${p.kind} @${formatTile(p.tile)}  ${p.elapsed}/${p.durationTicks}` +
+        (p.done ? '  done' : ''),
+    );
+  }
+  if (caravan.deploy.placements.length) {
+    lines.push(`Deploy (${caravan.deploy.placements.length}):`);
+    for (const p of caravan.deploy.placements) {
+      lines.push(`  ${p.characterInstanceId} @ ${p.col},${p.row}`);
+    }
+  }
   lines.push(
     `Counts: chars=${stats.characterCount} mounts=${stats.mountCount} ` +
-      `stations=${stats.stationCount} empty=${stats.emptySlots}`,
+      `stations=${stats.stationCount} staffedStations=${stats.staffedStationCount} ` +
+      `empty=${stats.emptySlots}`,
   );
+  if (caravan.assignments.length) {
+    lines.push(`Assignments (${caravan.assignments.length}):`);
+    for (const a of caravan.assignments) {
+      lines.push(`  ${a.characterInstanceId} → ${a.stationInstanceId}`);
+    }
+  }
+  if (caravan.holds.length || caravan.loose.length) {
+    lines.push('Inventory:');
+    for (const h of caravan.holds) {
+      const stacks =
+        h.stacks.length === 0
+          ? 'empty'
+          : h.stacks.map((s) => `${s.qty} ${s.materialId}`).join(', ');
+      lines.push(`  hold ${h.stationInstanceId}: ${stacks}`);
+    }
+    if (caravan.loose.length) {
+      lines.push(
+        `  loose: ${caravan.loose.map((s) => `${s.qty} ${s.materialId}`).join(', ')}`,
+      );
+    }
+  }
   if (caravan.legs.length) {
     lines.push(`Legs (${caravan.legs.length}):`);
     for (const leg of caravan.legs) {
@@ -52,9 +89,13 @@ export function formatCaravan(caravan: Caravan, step = 0): string {
         const o = slot.occupant;
         const speed =
           o.ticksPerTile != null ? `  ticks/tile=${o.ticksPerTile}` : '';
+        const sated =
+          o.kind === 'character' && o.satedUntilStep != null
+            ? `  satedUntil=${o.satedUntilStep}`
+            : '';
         lines.push(
           `  [${String(slot.def.index).padStart(2, ' ')}] ${label}${typing}: ` +
-            `${o.name} (${o.catalogId})${speed}`,
+            `${o.name} (${o.catalogId})${speed}${sated}`,
         );
       } else {
         lines.push(`  [${String(slot.def.index).padStart(2, ' ')}] ${label}${typing}: —`);

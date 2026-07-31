@@ -1,6 +1,13 @@
 import { catalogById } from './catalog.ts';
 import { deriveStats } from './derive.ts';
 import { positionAt } from './legs.ts';
+import { clearAssignmentsFor } from './staff.ts';
+import { detachHold } from './inventory.ts';
+import {
+  claimSettlement,
+  freeSettlement,
+  type Region,
+} from './region.ts';
 import {
   ContainerClass,
   Form,
@@ -60,6 +67,10 @@ export function stripOutpostSlot(caravan: Caravan): {
   const occupant = slot.occupant;
   const refunds = refundForStation(occupant);
   vehicle.slots.splice(idx, 1);
+  if (occupant) {
+    detachHold(caravan, occupant.instanceId);
+    clearAssignmentsFor(caravan, occupant.instanceId);
+  }
   return { occupant, refunds };
 }
 
@@ -67,7 +78,10 @@ export function stripOutpostSlot(caravan: Caravan): {
  * Settle: caravan becomes an immobile outpost and gains the outpost station slot.
  * Rejects while travelling at `step`.
  */
-export function settle(caravan: Caravan, step = 0): SettleResult {
+export function settle(caravan: Caravan, step = 0, region?: Region): SettleResult {
+  if (caravan.form === Form.derelict) {
+    return { ok: false, reason: 'cannot settle a derelict; salvage first' };
+  }
   if (caravan.form !== Form.caravan) {
     return { ok: false, reason: `already settled as ${caravan.form}; mobilise first` };
   }
@@ -89,8 +103,14 @@ export function settle(caravan: Caravan, step = 0): SettleResult {
     return { ok: false, reason: 'outpost slot already present (chassis bug)' };
   }
 
+  if (region) {
+    const claim = claimSettlement(region, pos.tile, caravan.id);
+    if (!claim.ok) return claim;
+  }
+
   vehicle.slots.push({ def: { ...OUTPOST_SLOT_DEF }, occupant: null });
   caravan.form = Form.outpost;
+  caravan.activity = null;
   return { ok: true, refunds: [], strippedStation: null };
 }
 
@@ -98,7 +118,7 @@ export function settle(caravan: Caravan, step = 0): SettleResult {
  * Mobilise: destroy the outpost slot (refund station scrap) and restore mobility.
  * Requires a managing character — unstaffed path is collapse via unfit.
  */
-export function mobilise(caravan: Caravan): SettleResult {
+export function mobilise(caravan: Caravan, region?: Region, step = 0): SettleResult {
   if (caravan.form !== Form.outpost) {
     return { ok: false, reason: 'not an outpost; settle first' };
   }
@@ -112,6 +132,11 @@ export function mobilise(caravan: Caravan): SettleResult {
 
   const { refunds, occupant } = stripOutpostSlot(caravan);
   caravan.form = Form.caravan;
+  caravan.activity = null;
+  if (region) {
+    const pos = positionAt(caravan, step);
+    freeSettlement(region, pos.tile, caravan.id);
+  }
   return { ok: true, refunds, strippedStation: occupant };
 }
 

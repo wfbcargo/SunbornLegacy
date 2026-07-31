@@ -6,6 +6,21 @@
 - **Chassis** — a vehicle's fixed slot layout (e.g. `basic_wagon`).
 - **Station** — every structure in the game (vehicle module, city building, outpost).
   Fits slots typed by tier × container class (Session 11).
+- **Assignment** — soft link from a fitted character to a fitted station (character stays
+  in their seat). One-to-one this slice; station is operational iff assigned.
+- **Hold** — cargo capacity on a fitted station (`cargo_chest`). Stacks live in holds or
+  on the caravan as **loose** until deposited.
+- **satedUntilStep** — food deadline on a character. Past the deadline they starve
+  (removed). Feeding spends `rations` and extends the deadline.
+- **Tile activity** — remain stationary for N ticks on a tile (survey, later mining /
+  build). Fleeing forfeits progress this slice. Completing a survey deposits
+  `survey_notes` into inventory.
+- **Deploy template** — Side-A battle placements (4×6 zone) on the caravan. A skirmish
+  bridges them into `src/battle` vs a canned raid (lab only — no wounds written back).
+- **Derelict** — form after the last character is gone; chassis/cargo remain until
+  salvage (decision `0039`).
+- **Fertility** — biome lookup 0…3 gating `food_grower` produce (no depleting soil
+  channel yet).
 - **Outpost** — a settled caravan: immobile, gains one basic/outpost station slot.
   Requires a managing character; last character leaving collapses it. Mobilising
   destroys the outpost slot and refunds half its station construction scrap.
