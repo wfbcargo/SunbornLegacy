@@ -169,6 +169,37 @@ const HEATS: number[] = [];
 for (let h = -20; h <= 200; h += 5) HEATS.push(h);
 const MOISTS: number[] = [];
 for (let m = 0; m <= 100; m += 5) MOISTS.push(m);
+/**
+ * The permissive value of the static `tectonic` channel — pinned, NOT swept.
+ *
+ * ★ SWEEPING IT WAS BUILT, MEASURED AND REVERTED. Adding `tectonic ∈ {1, 0}` as the
+ * OUTERMOST loop below looks free: with the permissive value first, any rule satisfiable
+ * at 1 returns during the first outer pass and never sees the second, and no rule reads
+ * the field today. That is true — and it protects exactly the case that does not matter.
+ *
+ * The early exit only helps SATISFIABLE rules. An UNSATISFIABLE one runs both passes to
+ * completion, so it costs precisely double, and `reachableCore` exists to probe rules
+ * under RESTRICTED flag masks, where being unsatisfiable is the common case. Counted in
+ * `rule.when()` invocations across all rules (deterministic, unlike wall-clock on a loaded
+ * machine, which varied >4x between identical runs here):
+ *
+ *     preset          unsat rules      pinned          swept    ratio
+ *     anvil                    46   490,112,220    973,020,450   1.99x
+ *     garden                   50 2,836,335,003  5,635,803,003   1.99x
+ *     crucible                  0    51,966,809     51,966,809   1.00x
+ *     (unrestricted)            0    51,966,809     51,966,809   1.00x
+ *
+ * So the sweep is free exactly where nothing needed it and doubles the cost exactly where
+ * `reachableCore` spends its 0.2–31 s — which the viewer's `/api/reachability` waits on.
+ *
+ * `tectonic` is therefore pinned at its permissive value, as `downhillNeighbours` is
+ * pinned at 6. ⚠️ That is sound only while every rule reading the field wants "more": a
+ * rule gated `tectonic < T` would be probed against 1 alone and could be wrongly reported
+ * unsatisfiable. The spec that first ships a `tectonic`-gated rule owns either paying the
+ * 2x or finding a cheaper probe — with a benefit on the other side of the cost, which
+ * today there is not.
+ */
+const PERMISSIVE_TECTONIC = 1;
 
 const scratchCounts = new Int32Array(BIOME_COUNT);
 
@@ -236,6 +267,8 @@ function makeContext(
     // A tile with somewhere for water to go in every direction — a peak, which is
     // achievable and is the permissive case for the two nucleation gates.
     downhillNeighbours: 6,
+    tectonic: PERMISSIVE_TECTONIC,
+    cellSizeTiles: 1,
     flags,
     underBeam: (flags & CycleFlag.Beam) !== 0,
   };

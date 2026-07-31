@@ -230,6 +230,28 @@ export interface TileContext {
    */
   readonly downhillNeighbours: number;
   /**
+   * How live this tile's crust is, 0..1. Static worldgen geography — see `World.tectonic`.
+   *
+   * ★ THE ONLY RAW STATIC NUMBER IN THIS INTERFACE, AND THE EXCEPTION IS EARNED. Elevation
+   * is deliberately NOT here (decision `0018`): it feeds `heatOffset`, so a rule
+   * thresholding it sits one step from a self-reinforcing loop, and it reaches rules only
+   * through `upstreamRiverNeighbours` / `downhillNeighbours`. `tectonic` feeds nothing and
+   * nothing in the stepping path writes it, so a gate on it reads something the feature
+   * cannot create — decision `0021`'s condition, met exactly.
+   *
+   * ⚠️ No rule reads this yet. Whether one should is a held product decision: every route
+   * into Rock is currently `CycleFlag.Quake`-gated, which is what makes `README.md`
+   * finding #4 true, and a `tectonic`-gated route would give a beam-only world mountains
+   * it cannot currently have. See `specs/d53ccbb6-2_tectonic-channel.md`.
+   */
+  readonly tectonic: number;
+  /**
+   * Fine tiles represented by one cell of this world. 1 on the fine tier;
+   * `COARSE_FACTOR` on the coarse tier. Bloom's moisture floor reads it (decision
+   * `0034`) so the fine niche stays bit-identical at 1.
+   */
+  readonly cellSizeTiles: number;
+  /**
    * OR of every CycleFlag raised on this tile today — see cycles.ts.
    *
    * This is how the disturbance engine reaches the ruleset. Rules should test flags,
@@ -592,11 +614,83 @@ function hostileNeighbours(c: TileContext): number {
  * This is the narrowest envelope in the set, and deliberately so. Measured at 3-6% of
  * the world on the first pass, which is an order of magnitude too common; the mature-
  * canopy requirement is what brought it back to the fraction of a percent the
- * prototype found. Do NOT widen it to make bloom show up more — its scarcity IS the
- * design, and it is the reason a world is worth crossing.
+ * prototype found. Do NOT widen this niche on the fine tier to make it show up more —
+ * its scarcity IS the design, and it is the reason a world is worth crossing.
+ *
+ * ★ THE MOISTURE FLOOR IS RESOLUTION-AWARE (`bloomMoistureMin`). On the fine tier it
+ * is 93. On the coarse tier the land-moisture p90 sits at 65–80 after specs 5–6, so a
+ * hard 93 makes Bloom chemically unreachable (ABSENT), not merely filamentary.
+ * `bloomMoistureMin(cellSize)` restores a reachable wet-extreme on coarse without
+ * changing the fine bit pattern at `cellSize === 1`. Decision `0034`.
  */
+export const BLOOM_MOISTURE_FINE = 93;
+/**
+ * Coarse-tier bloom moisture floor. Measured on garden 240×144 (spec `d53ccbb6-8`):
+ * at 78 (near coarse p90) Bloom share is 0.04%; at 50 it is ~0.74% against fine
+ * ~1.04%. The coarse moisture field is compressed, so recovering Bloom's scarce
+ * wet-canopy role needs a lower absolute floor; heat band and canopy gate still
+ * bind. Fine tier stays at 93. Decision `0034`.
+ */
+export const BLOOM_MOISTURE_COARSE = 50;
+
+export function bloomMoistureMin(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? BLOOM_MOISTURE_FINE : BLOOM_MOISTURE_COARSE;
+}
+
+/**
+ * Resolution-aware moisture extremes for the four residual structural M1 silences
+ * on `still` (spec `d53ccbb6-9`, decision `0035`). Same shape as `bloomMoistureMin`:
+ * fine bit-identical at `cellSizeTiles === 1`; coarse values are measured eligibility
+ * calibrations against biome-local moisture-tail compression after specs 5–6.
+ *
+ * Do NOT fold these into the global `ARID` / `DRY` / `MOIST` constants — those gate
+ * many other rules whose fine chemistry must stay put.
+ */
+export const SCRUB_BURNS_ARID_FINE = ARID;
+export const SCRUB_BURNS_ARID_COARSE = 26;
+export function scrubBurnsAridMax(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? SCRUB_BURNS_ARID_FINE : SCRUB_BURNS_ARID_COARSE;
+}
+
+export const SCOURED_BARE_DRY_FINE = DRY;
+export const SCOURED_BARE_DRY_COARSE = 35;
+export function scouredBareDryMax(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? SCOURED_BARE_DRY_FINE : SCOURED_BARE_DRY_COARSE;
+}
+
+export const GROUND_WATERLOGS_EXTREME_FINE = 92;
+export const GROUND_WATERLOGS_EXTREME_COARSE = 70;
+export function groundWaterlogsExtreme(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? GROUND_WATERLOGS_EXTREME_FINE : GROUND_WATERLOGS_EXTREME_COARSE;
+}
+
+/** Cool-wet floor for `ground waterlogs`. Fine keeps `WET`; coarse cool grassland max moisture sits near 73 after specs 5–6, so `WET(78)` is unreachable. */
+export const GROUND_WATERLOGS_WET_FINE = WET;
+export const GROUND_WATERLOGS_WET_COARSE = 70;
+export function groundWaterlogsWetMin(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? GROUND_WATERLOGS_WET_FINE : GROUND_WATERLOGS_WET_COARSE;
+}
+
+export const TREES_TAKE_ROOT_MOIST_FINE = MOIST;
+export const TREES_TAKE_ROOT_MOIST_COARSE = 55;
+export function treesTakeRootMoistMin(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? TREES_TAKE_ROOT_MOIST_FINE : TREES_TAKE_ROOT_MOIST_COARSE;
+}
+
+/**
+ * Ceiling for `wetland dries` (`moisture < …`). Fine keeps `WET`. Coarse marsh
+ * briefly dips just below 78 while fine marsh never does on `still` — a 70
+ * ceiling restores fine's silence without blocking real drought drying on live
+ * presets where moisture falls further.
+ */
+export const WETLAND_DRIES_MOIST_FINE = WET;
+export const WETLAND_DRIES_MOIST_COARSE = 70;
+export function wetlandDriesMoistureMax(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? WETLAND_DRIES_MOIST_FINE : WETLAND_DRIES_MOIST_COARSE;
+}
+
 function blooming(c: TileContext): boolean {
-  if (c.moisture < 93 || c.heat < 56 || c.heat > 64) return false;
+  if (c.moisture < bloomMoistureMin(c.cellSizeTiles) || c.heat < 56 || c.heat > 64) return false;
   if (hostileNeighbours(c) > 0) return false;
   const n = c.neighbourCounts;
   return n[Biome.Forest]! + n[Biome.Rainforest]! + n[Biome.Bloom]! >= 4;
@@ -1181,7 +1275,10 @@ const RULE_DEFS: readonly RuleDef[] = [
   },
   {
     from: Biome.Marsh, to: Biome.Grassland, medianDays: 9, label: 'wetland dries',
-    when: (c) => (c.waterNeighbours <= 1 && c.moisture < WET ? dryingBoost(c) : 0),
+    when: (c) =>
+      c.waterNeighbours <= 1 && c.moisture < wetlandDriesMoistureMax(c.cellSizeTiles)
+        ? dryingBoost(c)
+        : 0,
   },
   {
     from: Biome.Swamp, to: Biome.Grassland, medianDays: 10, label: 'swamp dries out',
@@ -1349,7 +1446,10 @@ const RULE_DEFS: readonly RuleDef[] = [
   // =========================================================================
   {
     from: Biome.Grassland, to: Biome.Forest, medianDays: 12, label: 'trees take root',
-    when: (c) => (c.moisture > MOIST && c.heat > COLD && c.heat < WARM ? 1 : 0),
+    when: (c) =>
+      c.moisture > treesTakeRootMoistMin(c.cellSizeTiles) && c.heat > COLD && c.heat < WARM
+        ? 1
+        : 0,
   },
   {
     // The second rung of the drying ladder. Grassland does NOT flip straight to
@@ -1365,9 +1465,13 @@ const RULE_DEFS: readonly RuleDef[] = [
   {
     // Wetlands need a path that does not depend on the thin shallows ribbon, or
     // marsh only ever exists on the coast and reed/peat/clay leave the economy.
+    // ★ Cool-wet floors are resolution-aware (`0035`): coarse cool grassland never
+    // reaches `WET(78)` / `92`, so both gates read cellSize helpers.
     from: Biome.Grassland, to: Biome.Marsh, medianDays: 16, label: 'ground waterlogs',
     when: (c) =>
-      c.moisture > WET && c.heat < WARM && (c.waterNeighbours >= 2 || c.moisture > 92)
+      c.moisture > groundWaterlogsWetMin(c.cellSizeTiles) &&
+      c.heat < WARM &&
+      (c.waterNeighbours >= 2 || c.moisture > groundWaterlogsExtreme(c.cellSizeTiles))
         ? wettingBoost(c)
         : 0,
   },
@@ -1377,7 +1481,8 @@ const RULE_DEFS: readonly RuleDef[] = [
   },
   {
     from: Biome.Savanna, to: Biome.Desert, medianDays: 14, label: 'the scrub burns off',
-    when: (c) => (c.heat > WARM && c.moisture < ARID ? dryingBoost(c) : 0),
+    when: (c) =>
+      c.heat > WARM && c.moisture < scrubBurnsAridMax(c.cellSizeTiles) ? dryingBoost(c) : 0,
   },
   {
     from: Biome.Forest, to: Biome.Grassland, medianDays: 7, label: 'canopy thins',
@@ -1444,7 +1549,10 @@ const RULE_DEFS: readonly RuleDef[] = [
   },
   {
     from: Biome.Tundra, to: Biome.Rock, medianDays: 60, label: 'scoured bare',
-    when: (c) => (c.heat < FROZEN && c.moisture < DRY ? (has(c, CycleFlag.Freeze) ? 3 : 1) : 0),
+    when: (c) =>
+      c.heat < FROZEN && c.moisture < scouredBareDryMax(c.cellSizeTiles)
+        ? (has(c, CycleFlag.Freeze) ? 3 : 1)
+        : 0,
   },
   {
     from: Biome.Tundra, to: Biome.Glacier, medianDays: 30, label: 'the ice thickens',

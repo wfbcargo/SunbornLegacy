@@ -12,6 +12,7 @@
     "sim:still": "node src/sim/run.ts --cycles still",
     "sim:check": "node src/sim/invariants.ts",
     "sim:golden": "node src/sim/golden.ts",
+    "sim:lod": "node src/sim/lod.ts",
     "sim:sweep": "node src/sim/sweep.ts",
     "sim:trace": "node src/sim/diagnose.ts",
     "viewer": "node src/viewer/server.ts"

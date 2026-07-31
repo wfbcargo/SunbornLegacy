@@ -12,7 +12,7 @@ devDependencies, erased at runtime (decision `0004`).
 src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 ├── hex.ts        HexTorus: toroidal hex grid, neighbour offsets, index<->col/row
 ├── rng.ts        hash32 / rollAt / mulberry32 / hashString (FNV-1a over a string)
-├── biomes.ts     23 biomes + 185 transition rules + climate thresholds. SEA is DERIVED
+├── biomes.ts     23 biomes + 187 transition rules + climate thresholds. SEA is DERIVED
 │                 from a predicate (water && !molten), never enumerated — see gotchas.
 │                 RuleDef (authored) and Rule (identity attached) are separate types;
 │                 a rule's roll stream comes from its content-derived keyHash (decision 0002)
@@ -23,8 +23,34 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 A cycle may READ the world: dayState(day, view) + readsWorld, and heat
 │                 has two channels — acute `heat` and filtered `ambientHeat` (decision 0007).
 │                 SolarBeam is shape: 'band' | 'blob', defaulting to a swept disc (0008)
-├── world.ts      World — owns biome/moisture/temperature/elevation arrays, band sweep,
-│                 the per-day maritime proximity field, stepDay()
+├── worldgen.ts   worldgenAt(cfg, col, row) — day-0 tile state as a PURE function of
+│                 position, no whole-grid allocation. Owns the fbm/periodicNoise field,
+│                 seedBiome and latitudeHeat. `World.generate()` is a loop over it.
+│                 TWO static channels: elevation (hidden behind derived TileContext
+│                 fields, decision 0018) and tectonic (exposed RAW — it feeds nothing,
+│                 so decision 0021's "a gate reads what the feature cannot create"
+│                 holds; 4 octaves, read by no rule yet, decision 0029)
+│                 ⚠️ Takes the world's WIDTH AND HEIGHT: the noise is normalised by grid
+│                 size, so `worldgenAt(seed, col, row)` as specified in
+│                 ARCHITECTURE.md#13 Phase 1 cannot reproduce a world. That is also what
+│                 lets the coarse tier sample the same continuous field at 1/8 resolution
+├── coarse.ts     the 8×8 coarse tier (ARCHITECTURE.md#4.1). The coarse world is an
+│                 ORDINARY World at width/8 × height/8 running the ordinary stepDay(),
+│                 not a second stepping loop; same seed samples the same continuous
+│                 field because the noise is grid-normalised. Cycle lengths are scaled
+│                 by the catalogue's `unit`, never a hand list. Length units shrink
+│                 with factor; moisture-push units (seasons.moistureAmplitude) shrink
+│                 by factor^(1/3) so summer drought does not compound with the scaled
+│                 heat leak (decision 0032). makeCoarseWorld also passes
+│                 cellSizeTiles: factor so world.ts scales moisture leak and
+│                 THERMAL_KAPPA (decision 0031). projectBiome/projectMoisture are the
+│                 materialized-region projection. Judged by spec d53ccbb6-4
+├── world.ts      World — owns biome/moisture/temperature/elevation/tectonic arrays,
+│                 band sweep, stepDay(). cellSizeTiles (default 1) drives
+│                 moistureRetention and thermalKappaFor — fine tier unchanged,
+│                 coarse tier scales (decision 0031)
+├── lod.ts        LOD-agreement gate harness (npm run sim:lod). May print (R-007);
+│                 writes nothing into the stepping path
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)
 ├── run.ts        CLI entry: argv -> World -> console report
 ├── reachability.ts  PURE graph + satisfiability core: buildAdjacency, tarjan,

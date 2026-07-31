@@ -16,11 +16,15 @@
  */
 
 import { HexTorus } from './hex.ts';
-import { medianToProbability, mulberry32, rollAt } from './rng.ts';
+import { medianToProbability, rollAt } from './rng.ts';
 import {
-  ARID, BIOME_COUNT, Biome, BIOMES, COLD, DRY, GLACIAL, MOIST, RULES_BY_BIOME,
-  SCORCHING, WARM, WET, type TileContext,
+  BIOME_COUNT, Biome, BIOMES, RULES_BY_BIOME, type TileContext,
 } from './biomes.ts';
+// The climate thresholds and the noise field moved out with `seedBiome` — worldgen is a
+// pure function of position now, and `World.generate` is a loop over it (spec `d53ccbb6-1`).
+import {
+  latitudeHeat, makeWorldgenTile, worldgenAt, worldgenConfig,
+} from './worldgen.ts';
 import {
   CycleEffect, CycleFlag, SolarBeam, TerrainClass, makeCycle,
   type BeamSighting, type CycleForecast, type CycleSpec, type WorldCycle, type WorldView,
@@ -118,6 +122,80 @@ export const DEFAULT_BAND_WIDTH = 8;
 export const THERMAL_KAPPA = 0.30;
 
 /**
+ * Temperate moisture retention on a 1-tile cell — the constant the hydrology comment
+ * pins to "~0.02/tile" inland falloff. Heat raises the leak; see `moistureRetention`.
+ */
+export const MOISTURE_RETENTION_TEMPERATE = 0.9998;
+const MOISTURE_LEAK_TEMPERATE = 1 - MOISTURE_RETENTION_TEMPERATE; // 0.0002
+const MOISTURE_LEAK_PER_HEAT = 0.0006;
+
+/**
+ * How the moisture leak scales when one cell represents many fine tiles.
+ *
+ * Continuum 2D diffusion from `exp(-sqrt(2(1-r))·d)` implies power **2**
+ * (`1-r_coarse = factor²·(1-r_fine)` → r≈0.9872 at factor 8). Measured on `still`
+ * 240×144 seed 20260729 after 300d (spec `d53ccbb6-5`):
+ *
+ *   power 0 (unscaled)  arid  0.00%  meanM 97.2   ← decision 0030's bug
+ *   power 1             arid 11.06%  meanM 61.9
+ *   power 1.25          arid 22.54%  meanM 48.6   ← fine is 21.74% / 57
+ *   power 2 (derived)   arid 62.85%  meanM 22.8   ← overshoots
+ *
+ * Power 2 fails because the fine inland moisture profile is not a coastal
+ * exponential (ladder 5 of the LOD gate: fine reads 51→46→56→69→71→99 going
+ * inland). Aridity is heat-driven, not coast-distance-driven, so matching the
+ * 2D coastal length scale is matching the wrong thing. 1.25 is the measured
+ * calibration that closes the ARID share; decision `0031`.
+ */
+export const MOISTURE_LEAK_GRID_POWER = 1.25;
+
+/**
+ * Moisture retention for one hydrology step on a cell that represents `cellSizeTiles`
+ * fine tiles.
+ *
+ * ★ THE LEAK SCALES WITH `cellSize^MOISTURE_LEAK_GRID_POWER`, NOT WITH `cellSize²`.
+ * See the constant above for the measurement that rejected the continuum derivation.
+ * The heat term is part of the leak, so it scales with the same power — scaling the
+ * base alone and leaving heat fixed leaves coarse arid share at 0% (measured).
+ * The `max(0.5, …)` floor is unchanged from the fine tier.
+ */
+export function moistureRetention(heat: number, cellSizeTiles = 1): number {
+  const heatLeak = Math.max(0, heat - 52) * MOISTURE_LEAK_PER_HEAT;
+  const leak =
+    (MOISTURE_LEAK_TEMPERATE + heatLeak) *
+    Math.pow(cellSizeTiles, MOISTURE_LEAK_GRID_POWER);
+  return Math.max(0.5, 1 - leak);
+}
+
+/**
+ * How cycle moisture-push amplitudes shrink on a coarse cell.
+ *
+ * Spec 6 measured: after the leak scales up (`MOISTURE_LEAK_GRID_POWER`), the
+ * seasons moisture sinusoid on the coarse tier is net-drying — summer drought
+ * (moisture lags heat by half a year) compounds with the scaled heat leak and
+ * clips against the floor. Dividing push amplitudes by `cellSize^(1/3)`
+ * (= 2 at factor 8) brings garden/crucible arid within ~10 pp of fine without
+ * moving `still`. Decision `0032`.
+ */
+export const MOISTURE_PUSH_COARSE_POWER = 1 / 3;
+
+export function moisturePushCoarseScale(cellSizeTiles = 1): number {
+  return 1 / Math.pow(cellSizeTiles, MOISTURE_PUSH_COARSE_POWER);
+}
+
+/**
+ * Neighbour-exchange weight for a cell of the given size.
+ *
+ * Penetration is `~sqrt(κ/α)` in *cells* (`THERMAL_KAPPA`'s own comment). Holding
+ * tile-scale reach fixed therefore needs `κ_coarse = κ_fine / factor²`. Decision
+ * `0030` listed this as a candidate (coarse land 2–3 units cooler); spec
+ * `d53ccbb6-5` co-ships it as the same class of bug as the hydrology leak.
+ */
+export function thermalKappaFor(cellSizeTiles = 1): number {
+  return THERMAL_KAPPA / (cellSizeTiles * cellSizeTiles);
+}
+
+/**
  * The stability bound, checked once at module evaluation rather than asserted in prose.
  *
  * An explicit two-term scheme `T += alpha*(H-T) + kappa*(mean(T_nb)-T)` needs
@@ -126,6 +204,9 @@ export const THERMAL_KAPPA = 0.30;
  * is no run in which that looks like a subtle bias; it looks like a world of NaN. This
  * throws at import, so a biome table that breaks the bound cannot reach a simulation at
  * all, let alone one whose numbers someone then records.
+ *
+ * Checked against the fine-tier constant (`cellSizeTiles = 1`). A coarse world uses a
+ * *smaller* kappa, so the bound is strictly easier there.
  */
 (() => {
   const bad = BIOMES.filter((d) => d.thermalAlpha + THERMAL_KAPPA > 1 || d.thermalAlpha <= 0);
@@ -192,11 +273,28 @@ export interface WorldOptions {
   /** Width of the beam in columns. */
   beamWidth?: number;
   seaLevel?: number;
+  /**
+   * How many fine tiles one cell of this world represents. Default 1.
+   *
+   * The coarse tier passes `COARSE_FACTOR` (8) so hydrology retention and
+   * `THERMAL_KAPPA` keep the same *tile-scale* length as the fine tier (decision
+   * `0031`). A fine world must leave this at 1 — anything else would move the
+   * goldens, and specs 1–5 require they do not move.
+   */
+  cellSizeTiles?: number;
 }
 
 export class World {
   readonly grid: HexTorus;
   readonly seed: number;
+  /**
+   * Fine tiles represented by one cell of this grid. 1 for a fine world;
+   * `COARSE_FACTOR` for a coarse one. Drives `moistureRetention` and the instance
+   * thermal kappa — see `WorldOptions.cellSizeTiles`.
+   */
+  readonly cellSizeTiles: number;
+  /** `thermalKappaFor(cellSizeTiles)` — cached so the day exchange does not recompute. */
+  private readonly thermalKappa: number;
 
   readonly biome: Uint8Array;
   readonly moisture: Float32Array;
@@ -234,6 +332,30 @@ export class World {
    * longer fuse and no cap. Nothing in the stepping path writes here. Decision `0018`.
    */
   readonly elevation: Float32Array;
+  /**
+   * Where the crust is live, 0..1. Static worldgen geography — WRITTEN ONCE AND NEVER
+   * AGAIN, the same discipline as `elevation` and for a related but distinct reason.
+   *
+   * ★ WHAT IT IS FOR. Permanent mineral geography. The economy separates harvest flows
+   * from permanent geology (`ARCHITECTURE.md#7.1`), and regional materials are the supply
+   * curve the trade game rests on. Mineral country that is re-rolled every time the beam
+   * passes is not geology, so the field that decides it must be one the simulation cannot
+   * touch. Independent of `elevation` on purpose: height and crustal activity are separate
+   * facts, so a world may hold a high dead plateau and a low active belt.
+   *
+   * ★ WHY IT IS EXPOSED RAW WHEN ELEVATION IS NOT — read this before adding a third static
+   * channel, because the elevation precedent points the other way. Decision `0018` hides
+   * elevation behind derived fields because elevation feeds `heatOffset`, so a rule
+   * thresholding it sits one step from a self-reinforcing loop. `tectonic` feeds nothing.
+   * Nothing in the stepping path writes here and no transition, cycle or feedback can move
+   * it, so a raw threshold on it satisfies decision `0021` exactly: a gate may read what
+   * the feature cannot create. That is a property of THIS field, not of static fields in
+   * general.
+   *
+   * Read by no rule today (spec `d53ccbb6-2` ships the channel unread, so the golden
+   * hashes cannot move). 4 bytes/tile, as `elevation`.
+   */
+  readonly tectonic: Float32Array;
   /** Static per-tile climate offsets from worldgen (elevation, prevailing damp). */
   private readonly heatOffset: Float32Array;
   private readonly moistOffset: Float32Array;
@@ -284,6 +406,16 @@ export class World {
     this.bandWidth = opts.bandWidth ?? DEFAULT_BAND_WIDTH;
     this.stepsPerDay = Math.ceil(opts.width / this.bandWidth);
 
+    const cellSize = opts.cellSizeTiles ?? 1;
+    if (!Number.isInteger(cellSize) || cellSize < 1) {
+      throw new Error(
+        `cellSizeTiles must be an integer >= 1 (got ${cellSize}). A fine world uses 1; ` +
+          `the coarse tier passes COARSE_FACTOR.`,
+      );
+    }
+    this.cellSizeTiles = cellSize;
+    this.thermalKappa = thermalKappaFor(cellSize);
+
     const specs: (CycleSpec | WorldCycle)[] =
       opts.cycles ??
       (opts.beam
@@ -311,6 +443,7 @@ export class World {
     this.temperatureSnapshot = new Float32Array(n);
     this.heatBase = new Float32Array(n);
     this.elevation = new Float32Array(n);
+    this.tectonic = new Float32Array(n);
     this.heatOffset = new Float32Array(n);
     this.moistOffset = new Float32Array(n);
 
@@ -400,7 +533,7 @@ export class World {
    * equator at row 0 and one cold band at row H/2, continuous across the seam.
    */
   private latitudeHeat(row: number): number {
-    return 26 * Math.cos((2 * Math.PI * row) / this.grid.height);
+    return latitudeHeat(row, this.grid.height);
   }
 
   /**
@@ -518,14 +651,14 @@ export class World {
    * the property a double-buffer bug destroys first.
    */
   private diffuseTemperature(): void {
-    const { grid, temperature, temperatureSnapshot } = this;
+    const { grid, temperature, temperatureSnapshot, thermalKappa } = this;
     const n = grid.size;
     temperatureSnapshot.set(temperature);
     for (let i = 0; i < n; i++) {
       const t = temperatureSnapshot[i]!;
       let sum = 0;
       for (let k = 0; k < 6; k++) sum += temperatureSnapshot[grid.neighbourAt(i, k)]!;
-      temperature[i] = t + THERMAL_KAPPA * (sum / 6 - t);
+      temperature[i] = t + thermalKappa * (sum / 6 - t);
     }
   }
 
@@ -749,9 +882,15 @@ export class World {
       // retention has to sit very close to 1. At r=0.995 the decay is ~0.1/tile and
       // every continental interior is bone dry; at 0.9998 it is ~0.02/tile, which
       // carries rain properly inland and leaves the hot band arid on its own.
+      //
+      // ★ AND `r` IS PER CELL, NOT PER TILE. On a coarse world one step is `factor`
+      // tiles of ground, so the leak scales with `factor^MOISTURE_LEAK_GRID_POWER`
+      // — see `moistureRetention` and decision `0031`. Hard-coding 0.9998 here is
+      // what made every coarse continent a swamp (decision `0030`). The continuum
+      // factor² derivation overshot; 1.25 is the measured calibration.
       const neighbourAvg = moistureSum / 6;
-      const retention = 0.9998 - Math.max(0, heat - 52) * 0.0006;
-      let target = neighbourAvg * Math.max(0.5, retention);
+      const retention = moistureRetention(heat, this.cellSizeTiles);
+      let target = neighbourAvg * retention;
       // Wetland — and now river — neighbours push the diffusion target up. A river is
       // standing fresh water, so a valley floor beside one is humid; this is the channel
       // through which the biome is "wet" at all, and it is a LAND-side channel. It moves
@@ -761,7 +900,7 @@ export class World {
       // Cycle moisture enters as an additive push on the diffusion TARGET — the same
       // channel marsh neighbours use — never as a change to the retention constant.
       // Bug #1 (retention 0.9998) and bug #2 (heat is a multiplicative decay, not a
-      // flat sink) live in the two lines above and must stay out of reach of cycles.
+      // flat sink) live in moistureRetention and must stay out of reach of cycles.
       target += effect.moisture;
       const next = moisture[i]! + (target - moisture[i]!) * 0.5;
       wet = next < 0 ? 0 : next > 100 ? 100 : next;
@@ -777,6 +916,8 @@ export class World {
       riverRing,
       upstreamRiverNeighbours,
       downhillNeighbours,
+      tectonic: this.tectonic[i]!,
+      cellSizeTiles: this.cellSizeTiles,
       flags: effect.flags,
       underBeam: (effect.flags & CycleFlag.Beam) !== 0,
     };
@@ -912,125 +1053,30 @@ export class World {
   // Worldgen
   // -------------------------------------------------------------------------
 
+  /**
+   * A loop over `worldgenAt`, and nothing more. The maths lives in `worldgen.ts` so a
+   * caller can generate one tile — or one region's 64 — without building a world
+   * (`ARCHITECTURE.md#4.3`). One scratch object for the whole grid, not one per tile.
+   */
   private generate(seaLevel: number): void {
     const { grid } = this;
-    const rand = mulberry32(this.seed ^ 0x5eed);
-    const elevSeed = (rand() * 1e9) | 0;
-    const moistSeed = (rand() * 1e9) | 0;
-    const roughSeed = (rand() * 1e9) | 0;
+    const cfg = worldgenConfig(this.seed, grid.width, grid.height, seaLevel);
+    const t = makeWorldgenTile();
 
     for (let row = 0; row < grid.height; row++) {
       for (let col = 0; col < grid.width; col++) {
         const i = row * grid.width + col;
-
-        const elev = this.fbm(col, row, elevSeed, 3);
-        const damp = this.fbm(col, row, moistSeed, 4);
-        const rough = this.fbm(col, row, roughSeed, 5);
+        worldgenAt(cfg, col, row, t);
 
         // The ONE write to `elevation`, for the life of the world. See the field.
-        this.elevation[i] = elev;
-        // Elevation cools, and adds regional variety beyond pure latitude. Note this is
-        // lossy in both directions — clamped below 0.5 and mixed with `rough` above it —
-        // which is exactly why the raw field above is kept rather than inverted from here.
-        this.heatOffset[i] = -34 * Math.max(0, elev - 0.5) + (rough - 0.5) * 10;
-        this.moistOffset[i] = (damp - 0.5) * 26;
-
-        const heat = 50 + this.latitudeHeat(row) + this.heatOffset[i]!;
-        const moist = 45 + this.moistOffset[i]! + (damp - 0.5) * 30;
-
-        const b = this.seedBiome(elev, heat, moist, seaLevel);
-        this.biome[i] = b;
-        // Seed from the SAME per-biome source the simulation uses, so day 0 is already
-        // a consistent hydrological state. Reading `water ? 100` here while
-        // `evaluateTile` reads `moistureSource` diverges the instant worldgen emits a
-        // frozen sea (source 55) or a lava field (source 0), and the divergence shows
-        // up as a one-day pulse of phantom moisture that is very hard to attribute.
-        const source = BIOMES[b]!.moistureSource;
-        this.moisture[i] = source > 0 ? source : Math.max(0, Math.min(100, moist));
+        this.elevation[i] = t.elevation;
+        this.tectonic[i] = t.tectonic;
+        this.heatOffset[i] = t.heatOffset;
+        this.moistOffset[i] = t.moistOffset;
+        this.biome[i] = t.biome;
+        this.moisture[i] = t.moisture;
       }
     }
-  }
-
-  /**
-   * Day-0 biome for a tile.
-   *
-   * Every family must be represented at worldgen. A world that starts with no
-   * mountains, no wetlands and no rainforest does eventually find them — but through
-   * the slowest edges in the graph, so it takes game-centuries and the first
-   * measurement window reports a world that is missing a third of its taxonomy. The
-   * arms below are climate-plausible seeds, not a shortcut around the ruleset: every
-   * one of them is somewhere the corresponding transition rule would have put it.
-   */
-  private seedBiome(elev: number, heat: number, moist: number, seaLevel: number): Biome {
-    if (elev < seaLevel - 0.04) return heat < GLACIAL ? Biome.FrozenSea : Biome.Ocean;
-    if (elev < seaLevel) return heat < GLACIAL ? Biome.FrozenSea : Biome.Shallows;
-
-    // Highland: peaks, then bare stone below them.
-    if (elev > 0.82) return Biome.Mountain;
-    if (elev > 0.76) return heat < GLACIAL && moist > 45 ? Biome.Glacier : Biome.Rock;
-
-    if (heat < GLACIAL && moist > 45) return Biome.Glacier;
-    if (heat < COLD - 2) return moist < DRY && heat < GLACIAL + 6 ? Biome.Rock : Biome.Tundra;
-
-    if (heat > SCORCHING && moist < ARID) return Biome.Desert;
-    if (heat > SCORCHING && moist < DRY) return Biome.Savanna;
-
-    if (moist > WET) {
-      if (heat > 58 && heat < 82) return Biome.Rainforest;
-      if (heat < 58) return Biome.Marsh;
-    }
-    if (moist > MOIST && heat >= 62) return Biome.Swamp;
-    if (moist > MOIST && heat < WARM) return Biome.Forest;
-    if (moist > DRY) return heat > WARM ? Biome.Savanna : Biome.Grassland;
-    if (moist > ARID) return heat > WARM ? Biome.Savanna : Biome.Grassland;
-    if (heat < COLD) return Biome.Tundra;
-    if (heat > WARM) return Biome.Desert;
-    return Biome.Barren;
-  }
-
-  /** Fractal value noise that tiles on the torus, so there is no seam. */
-  private fbm(col: number, row: number, seed: number, octaves: number): number {
-    let total = 0;
-    let amplitude = 1;
-    let norm = 0;
-    let periodX = 4;
-    let periodY = 3;
-
-    for (let o = 0; o < octaves; o++) {
-      total += amplitude * this.periodicNoise(col, row, periodX, periodY, seed + o * 7919);
-      norm += amplitude;
-      amplitude *= 0.5;
-      periodX *= 2;
-      periodY *= 2;
-    }
-    return total / norm;
-  }
-
-  private periodicNoise(col: number, row: number, periodX: number, periodY: number, seed: number): number {
-    const gx = (col / this.grid.width) * periodX;
-    const gy = (row / this.grid.height) * periodY;
-    const x0 = Math.floor(gx);
-    const y0 = Math.floor(gy);
-    const fx = gx - x0;
-    const fy = gy - y0;
-
-    const sx = fx * fx * (3 - 2 * fx);
-    const sy = fy * fy * (3 - 2 * fy);
-
-    const wrap = (v: number, p: number) => ((v % p) + p) % p;
-    const x1 = wrap(x0 + 1, periodX);
-    const y1 = wrap(y0 + 1, periodY);
-    const xw = wrap(x0, periodX);
-    const yw = wrap(y0, periodY);
-
-    const v00 = rollAt(seed, xw, yw);
-    const v10 = rollAt(seed, x1, yw);
-    const v01 = rollAt(seed, xw, y1);
-    const v11 = rollAt(seed, x1, y1);
-
-    const top = v00 + (v10 - v00) * sx;
-    const bottom = v01 + (v11 - v01) * sx;
-    return top + (bottom - top) * sy;
   }
 
   // -------------------------------------------------------------------------
