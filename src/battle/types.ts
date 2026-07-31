@@ -22,6 +22,10 @@ export const AbilityKind = {
 } as const;
 export type AbilityKind = (typeof AbilityKind)[keyof typeof AbilityKind];
 
+/**
+ * Action / gear stats — Session 12: combat role comes from equipment, not class.
+ * `range`, `cooldown`, and kind fields (damage, accuracy, …) live here.
+ */
 export interface Ability {
   id: string;
   name: string;
@@ -32,7 +36,10 @@ export interface Ability {
   cooldown: number;
   /** Strike / volley. */
   damage?: number;
-  /** Hit chance in [0,1]; defaults to the fighter's accuracy if omitted. */
+  /**
+   * Hit chance in [0,1]. Templates set this on every rollable ability;
+   * if omitted at resolve time, fighter.accuracy is the fallback (d8f1c3a0).
+   */
   accuracy?: number;
   /** Volley blast radius around the primary target (enemies only). */
   aoe?: number;
@@ -204,6 +211,8 @@ export interface Scenario {
   arenaHeight?: number;
   /** Engagement rounds before a forced draw. Default 12. */
   maxRounds?: number;
+  /** Optional world biome key for arena terrain (a1e9b472). */
+  biomeKey?: string;
 }
 
 export function assertDeployCell(

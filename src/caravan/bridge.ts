@@ -5,7 +5,12 @@
  */
 
 import { Arena, heightForForce } from '../battle/arena.ts';
-import { DEFAULT_MAX_ROUNDS, runEngagement } from '../battle/engagement.ts';
+import {
+  assessEngagement,
+  DEFAULT_MAX_ROUNDS,
+  runEngagement,
+  type Assessment,
+} from '../battle/engagement.ts';
 import {
   isTemplateId,
   MIX_RAID,
@@ -13,7 +18,11 @@ import {
   spawn,
   type TemplateId,
 } from '../battle/roster.ts';
+import { generateTerrain } from '../battle/terrain.ts';
 import { Side, type EngagementResult, type Fighter } from '../battle/types.ts';
+import { positionAt } from './legs.ts';
+import type { Region } from './region.ts';
+import { biomeDef } from './terrain.ts';
 import type { Caravan, FitResult, Occupant } from './types.ts';
 import { OccupantKind } from './types.ts';
 
@@ -26,6 +35,12 @@ export const CATALOG_TO_TEMPLATE: Record<string, TemplateId> = {
 export type BridgeOk = { ok: true; fighters: Fighter[]; battleId: string };
 export type BridgeErr = { ok: false; reason: string };
 export type BridgeResult = BridgeOk | BridgeErr;
+
+export interface SkirmishContext {
+  region?: Region;
+  /** World clock step — used with region to pick the fight tile's biome. */
+  step?: number;
+}
 
 function findCharacter(caravan: Caravan, instanceId: string): Occupant | null {
   for (const v of caravan.vehicles) {
@@ -103,23 +118,72 @@ export function buildSkirmish(
   return { ok: true, fighters, battleId };
 }
 
-export function skirmish(
+function engagementOpts(
   caravan: Caravan,
-  battleId?: string,
-  maxRounds = DEFAULT_MAX_ROUNDS,
-): FitResult & { engagement?: EngagementResult } {
+  battleId: string | undefined,
+  maxRounds: number,
+  ctx?: SkirmishContext,
+) {
   const built = buildSkirmish(caravan, battleId);
-  if (!built.ok) return { ok: false, reason: built.reason };
+  if (!built.ok) return built;
 
   const a = built.fighters.filter((f) => f.side === Side.A).length;
   const b = built.fighters.filter((f) => f.side === Side.B).length;
   const height = heightForForce(a, b);
-  const engagement = runEngagement({
-    engagementId: built.battleId,
-    title: `${caravan.name} skirmish`,
-    fighters: built.fighters,
-    arena: new Arena(height),
-    maxRounds,
-  });
+  const arena = new Arena(height);
+
+  let terrain = null;
+  const region = ctx?.region;
+  if (region) {
+    const step = ctx?.step ?? 0;
+    const tile = positionAt(caravan, step).tile;
+    const tileIndex = region.world.grid.index(tile.col, tile.row);
+    const biomeId = region.world.biome[tileIndex]!;
+    const def = biomeDef(biomeId);
+    terrain = generateTerrain({
+      biomeKey: def?.key ?? 'open',
+      battleId: built.battleId,
+      tileIndex,
+      width: arena.width,
+      height: arena.height,
+    });
+  }
+
+  return {
+    ok: true as const,
+    opts: {
+      engagementId: built.battleId,
+      title: `${caravan.name} skirmish`,
+      fighters: built.fighters,
+      arena,
+      terrain,
+      maxRounds,
+    },
+  };
+}
+
+export function skirmish(
+  caravan: Caravan,
+  battleId?: string,
+  maxRounds = DEFAULT_MAX_ROUNDS,
+  ctx?: SkirmishContext,
+): FitResult & { engagement?: EngagementResult } {
+  const built = engagementOpts(caravan, battleId, maxRounds, ctx);
+  if (!built.ok) return { ok: false, reason: built.reason };
+
+  const engagement = runEngagement(built.opts);
   return { ok: true, engagement };
+}
+
+export function assessSkirmish(
+  caravan: Caravan,
+  battleId?: string,
+  maxRounds = DEFAULT_MAX_ROUNDS,
+  ctx?: SkirmishContext,
+): FitResult & { assess?: Assessment } {
+  const built = engagementOpts(caravan, battleId, maxRounds, ctx);
+  if (!built.ok) return { ok: false, reason: built.reason };
+
+  const assess = assessEngagement(built.opts);
+  return { ok: true, assess };
 }

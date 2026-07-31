@@ -63,6 +63,7 @@ function glassRoadAmbush(): Scenario {
     title: 'Glass Road Ambush',
     blurb: 'Reedstep and Mirage jump Ashplate and Slagguard on the fused highway.',
     probes: 'Can dodge-skirmishers out-trade pure bastions before armor resets the math?',
+    biomeKey: 'glass',
     fighters: [
       spawn('reedstep', Side.A, 3, 1),
       spawn('mirage', Side.A, 3, 4),
@@ -80,6 +81,7 @@ function saltFlatDuel(): Scenario {
     title: 'Salt-Flat Duel',
     blurb: 'A single Reedstep challenges Ashplate in the open white.',
     probes: '1v1 close-range: does dodge + feint beat raw armor, or does crush win by attrition?',
+    biomeKey: 'desert',
     fighters: [
       spawn('reedstep', Side.A, 3, 2, 'Reedstep the Claimant'),
       spawn('ashplate', Side.B, 6, 3, 'Ashplate the Still'),
@@ -95,6 +97,7 @@ function arrowCorridor(): Scenario {
     title: 'Arrow Corridor',
     blurb: 'Sunstring and Glass-eye hold a lane; Dustpike and Wagon-ram must close it.',
     probes: 'Deployment depth and move cooldown — can melee cross the neutral zone under fire?',
+    biomeKey: 'forest',
     fighters: [
       spawn('sunstring', Side.A, 1, 1),
       spawn('glasseye', Side.A, 0, 4),

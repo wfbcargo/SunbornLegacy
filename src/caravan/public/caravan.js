@@ -57,6 +57,7 @@ const el = {
   deployGrid: document.getElementById('deploy-grid'),
   deployStatus: document.getElementById('deploy-status'),
   deployClear: document.getElementById('deploy-clear'),
+  deployAssess: document.getElementById('deploy-assess'),
   deploySkirmish: document.getElementById('deploy-skirmish'),
   skirmishResult: document.getElementById('skirmish-result'),
   investigateTile: document.getElementById('investigate-tile'),
@@ -998,6 +999,23 @@ el.deploySkirmish?.addEventListener('click', async () => {
         `outcome ${s.outcome} · rounds ${s.roundsPlayed} · ` +
         `alive A ${s.aliveA} / B ${s.aliveB}` +
         (s.summary?.[0] ? `\n${s.summary[0]}` : '');
+    }
+  } catch (err) {
+    showError(err.message || String(err));
+  }
+});
+
+el.deployAssess?.addEventListener('click', async () => {
+  try {
+    showError('');
+    const data = await api('/api/assess-skirmish', {});
+    await applyState(data);
+    const a = data.assess;
+    if (a && el.skirmishResult) {
+      el.skirmishResult.textContent =
+        `assess → ${a.outcome} in ${a.ticksToResolve} tick(s)\n` +
+        `losses A ${a.expectedLosses.A} / B ${a.expectedLosses.B} · ` +
+        `remain A ${a.remaining.A} / B ${a.remaining.B}`;
     }
   } catch (err) {
     showError(err.message || String(err));

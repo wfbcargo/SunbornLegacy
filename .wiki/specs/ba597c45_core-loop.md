@@ -2,7 +2,7 @@
 
 Branch: `main--epic/70a8a238_battle-sim--spec/ba597c45_core-loop`
 Epic: `70a8a238_battle-sim`
-Status: in progress
+Status: done (rolls / gear-bound ranges landed in `d8f1c3a0`; kernel grew past Spec 1)
 
 ## Objective
 

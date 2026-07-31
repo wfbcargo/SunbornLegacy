@@ -17,13 +17,19 @@ import {
   heightForForce,
 } from './arena.ts';
 import { hashString } from '../sim/rng.ts';
-import { DEFAULT_MAX_ROUNDS, runEngagement } from './engagement.ts';
+import { assessEngagement, DEFAULT_MAX_ROUNDS, runEngagement, type Assessment } from './engagement.ts';
 import {
   buildFromPlacements,
   listTemplates,
   type Placement,
 } from './roster.ts';
 import { allScenarios, scenarioById } from './scenarios.ts';
+import {
+  featureName,
+  generateTerrain,
+  terrainSummary,
+  type TerrainField,
+} from './terrain.ts';
 import type {
   BattleResult,
   EngagementResult,
@@ -129,6 +135,7 @@ function serializeScenario(s: Scenario) {
     count: s.fighters.length,
     arenaHeight: height,
     maxRounds: s.maxRounds ?? DEFAULT_MAX_ROUNDS,
+    biomeKey: s.biomeKey ?? null,
     deployments: s.fighters.map(serializeDeployment),
     sides: {
       A: s.fighters.filter((f) => f.side === Side.A).map((f) => ({
@@ -220,6 +227,8 @@ interface RunBody {
   arenaHeight?: number;
   maxRounds?: number;
   round?: number;
+  biome?: string;
+  tileIndex?: number;
 }
 
 function parsePlacements(raw: unknown): Placement[] {
@@ -247,18 +256,106 @@ function customBattleId(placements: readonly Placement[]): string {
   return `custom-${(hashString(key) >>> 0).toString(16)}`;
 }
 
-function runFromScenario(s: Scenario): EngagementResult {
-  const height = s.arenaHeight ?? heightForForce(
-    s.fighters.filter((f) => f.side === Side.A).length,
-    s.fighters.filter((f) => f.side === Side.B).length,
-  );
-  return runEngagement({
-    engagementId: s.id,
-    title: s.title,
-    fighters: s.fighters,
-    arena: new Arena(height),
-    maxRounds: s.maxRounds ?? DEFAULT_MAX_ROUNDS,
+function terrainFor(
+  engagementId: string,
+  arena: Arena,
+  biomeKey: string | undefined,
+  tileIndex: number | undefined,
+): TerrainField | null {
+  if (!biomeKey) return null;
+  return generateTerrain({
+    biomeKey,
+    battleId: engagementId,
+    tileIndex: tileIndex ?? 0,
+    width: arena.width,
+    height: arena.height,
   });
+}
+
+function serializeTerrain(field: TerrainField | null) {
+  if (!field) return null;
+  return {
+    biomeKey: field.biomeKey,
+    tileIndex: field.tileIndex,
+    summary: terrainSummary(field),
+    features: [...field.features].map((f) => featureName(f as 0 | 1 | 2 | 3 | 4)),
+  };
+}
+
+function serializeAssessment(a: Assessment, focusRound: number) {
+  return {
+    outcome: a.outcome,
+    ticksToResolve: a.ticksToResolve,
+    expectedLosses: a.expectedLosses,
+    remaining: a.remaining,
+    summary: a.summary,
+    engagement: serializeEngagement(a.engagement, focusRound),
+  };
+}
+
+function buildOpts(body: RunBody): {
+  opts: Parameters<typeof runEngagement>[0];
+  scenarioView: ReturnType<typeof serializeScenario>;
+  terrain: TerrainField | null;
+  custom: boolean;
+} {
+  if (body.placements) {
+    const placements = parsePlacements(body.placements);
+    const aCount = placements.filter((p) => p.side === Side.A).length;
+    const bCount = placements.filter((p) => p.side === Side.B).length;
+    const height = body.arenaHeight ?? heightForForce(aCount, bCount);
+    const fighters = buildFromPlacements(placements, height);
+    const title = body.title?.trim() || 'Custom battle';
+    const engagementId = customBattleId(placements);
+    const arena = new Arena(height);
+    const terrain = terrainFor(engagementId, arena, body.biome, body.tileIndex);
+    return {
+      opts: {
+        engagementId,
+        title,
+        fighters,
+        arena,
+        terrain,
+        maxRounds: body.maxRounds ?? DEFAULT_MAX_ROUNDS,
+      },
+      terrain,
+      custom: true,
+      scenarioView: serializeScenario({
+        id: engagementId,
+        title,
+        blurb: 'Player-authored deployment.',
+        probes: 'Your composition — tune freely.',
+        fighters,
+        arenaHeight: height,
+        maxRounds: body.maxRounds ?? DEFAULT_MAX_ROUNDS,
+        biomeKey: body.biome,
+      }),
+    };
+  }
+
+  const id = body.id ?? 'glass-road';
+  const fresh = scenarioById(id);
+  if (!fresh) throw new Error(`unknown scenario ${id}`);
+  const height = fresh.arenaHeight ?? heightForForce(
+    fresh.fighters.filter((f) => f.side === Side.A).length,
+    fresh.fighters.filter((f) => f.side === Side.B).length,
+  );
+  const arena = new Arena(height);
+  const biomeKey = body.biome ?? fresh.biomeKey;
+  const terrain = terrainFor(fresh.id, arena, biomeKey, body.tileIndex);
+  return {
+    opts: {
+      engagementId: fresh.id,
+      title: fresh.title,
+      fighters: fresh.fighters,
+      arena,
+      terrain,
+      maxRounds: fresh.maxRounds ?? DEFAULT_MAX_ROUNDS,
+    },
+    terrain,
+    custom: false,
+    scenarioView: serializeScenario(fresh),
+  };
 }
 
 const server = createServer(async (req, res) => {
@@ -299,7 +396,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (path === '/api/run' && req.method === 'POST') {
+    if ((path === '/api/run' || path === '/api/assess') && req.method === 'POST') {
       const raw = await readBody(req);
       let body: RunBody = {};
       try {
@@ -310,50 +407,27 @@ const server = createServer(async (req, res) => {
       }
 
       try {
-        let eng: EngagementResult;
-        let scenarioView: ReturnType<typeof serializeScenario>;
-
-        if (body.placements) {
-          const placements = parsePlacements(body.placements);
-          const aCount = placements.filter((p) => p.side === Side.A).length;
-          const bCount = placements.filter((p) => p.side === Side.B).length;
-          const height = body.arenaHeight ?? heightForForce(aCount, bCount);
-          const fighters = buildFromPlacements(placements, height);
-          const title = body.title?.trim() || 'Custom battle';
-          const engagementId = customBattleId(placements);
-          eng = runEngagement({
-            engagementId,
-            title,
-            fighters,
-            arena: new Arena(height),
-            maxRounds: body.maxRounds ?? DEFAULT_MAX_ROUNDS,
+        const built = buildOpts(body);
+        const focus = body.round ?? 1;
+        if (path === '/api/assess') {
+          const assessment = assessEngagement(built.opts);
+          cached = assessment.engagement;
+          json(res, 200, {
+            scenario: built.scenarioView,
+            assess: serializeAssessment(assessment, focus),
+            terrain: serializeTerrain(built.terrain),
+            custom: built.custom,
           });
-          scenarioView = serializeScenario({
-            id: engagementId,
-            title,
-            blurb: 'Player-authored deployment.',
-            probes: 'Your composition — tune freely.',
-            fighters,
-            arenaHeight: height,
-            maxRounds: body.maxRounds ?? DEFAULT_MAX_ROUNDS,
-          });
-        } else {
-          const id = body.id ?? 'glass-road';
-          const fresh = scenarioById(id);
-          if (!fresh) {
-            json(res, 404, { error: `unknown scenario ${id}` });
-            return;
-          }
-          eng = runFromScenario(fresh);
-          scenarioView = serializeScenario(fresh);
+          return;
         }
 
+        const eng = runEngagement(built.opts);
         cached = eng;
-        const focus = body.round ?? 1;
         json(res, 200, {
-          scenario: scenarioView,
+          scenario: built.scenarioView,
           engagement: serializeEngagement(eng, focus),
-          custom: Boolean(body.placements),
+          terrain: serializeTerrain(built.terrain),
+          custom: built.custom,
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);

@@ -4,14 +4,22 @@
  *   npm run battle
  *   npm run battle -- --list
  *   npm run battle -- --id field-20
+ *   npm run battle -- --assess --id salt-duel
+ *   npm run battle -- --id glass-road --biome forest --tile 0
  *   npm run battle -- --all
  */
 
 import { Arena, heightForForce } from './arena.ts';
-import { DEFAULT_MAX_ROUNDS, runEngagement } from './engagement.ts';
+import { assessEngagement, DEFAULT_MAX_ROUNDS, runEngagement } from './engagement.ts';
 import { formatResult } from './report.ts';
 import { allScenarios, scenarioById } from './scenarios.ts';
+import { generateTerrain, terrainSummary } from './terrain.ts';
 import { Side } from './types.ts';
+
+function flagValue(argv: string[], name: string): string | undefined {
+  const i = argv.lastIndexOf(name);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
 
 function main(argv: string[]): void {
   if (argv.includes('--list')) {
@@ -27,10 +35,13 @@ function main(argv: string[]): void {
     return;
   }
 
-  const idIdx = argv.lastIndexOf('--id');
-  const id = idIdx >= 0 ? argv[idIdx + 1] : undefined;
+  const id = flagValue(argv, '--id');
   const runAll = argv.includes('--all');
   const showLog = argv.includes('--log');
+  const doAssess = argv.includes('--assess');
+  const biome = flagValue(argv, '--biome');
+  const tileRaw = flagValue(argv, '--tile');
+  const tileIndex = tileRaw !== undefined ? Number(tileRaw) : 0;
 
   const scenarios = runAll
     ? allScenarios().filter((s) => s.fighters.length <= 40) // --all skips 50/100 unless asked
@@ -49,25 +60,55 @@ function main(argv: string[]): void {
     const a = s.fighters.filter((f) => f.side === Side.A).length;
     const b = s.fighters.filter((f) => f.side === Side.B).length;
     const height = s.arenaHeight ?? heightForForce(a, b);
-    console.log(`Resolving ${s.title} (${a}v${b}, 10×${height})…`);
-    const t0 = performance.now();
-    const eng = runEngagement({
+    const arena = new Arena(height);
+    const biomeKey = biome ?? s.biomeKey;
+    const terrain = biomeKey
+      ? generateTerrain({
+          biomeKey,
+          battleId: s.id,
+          tileIndex: Number.isFinite(tileIndex) ? tileIndex : 0,
+          width: arena.width,
+          height: arena.height,
+        })
+      : null;
+
+    const opts = {
       engagementId: s.id,
       title: s.title,
       fighters: s.fighters,
-      arena: new Arena(height),
+      arena,
+      terrain,
       maxRounds: s.maxRounds ?? DEFAULT_MAX_ROUNDS,
-    });
+    };
+
+    console.log(`Resolving ${s.title} (${a}v${b}, 10×${height})…`);
+    if (terrain) console.log(`  ${terrainSummary(terrain)}`);
+
+    const t0 = performance.now();
+    if (doAssess) {
+      const assess = assessEngagement(opts);
+      const assess2 = assessEngagement(opts);
+      if (
+        assess.outcome !== assess2.outcome ||
+        assess.ticksToResolve !== assess2.ticksToResolve ||
+        assess.expectedLosses.A !== assess2.expectedLosses.A ||
+        assess.expectedLosses.B !== assess2.expectedLosses.B
+      ) {
+        console.error(`DETERMINISM FAIL on assess ${s.id}`);
+        process.exit(1);
+      }
+      const ms = performance.now() - t0;
+      for (const line of assess.summary) console.log(`  · ${line}`);
+      console.log(`  (${ms.toFixed(0)} ms)`);
+      console.log('determinism: ok');
+      console.log('─'.repeat(60));
+      continue;
+    }
+
+    const eng = runEngagement(opts);
     const ms = performance.now() - t0;
 
-    // Determinism check
-    const eng2 = runEngagement({
-      engagementId: s.id,
-      title: s.title,
-      fighters: s.fighters,
-      arena: new Arena(height),
-      maxRounds: s.maxRounds ?? DEFAULT_MAX_ROUNDS,
-    });
+    const eng2 = runEngagement(opts);
     if (JSON.stringify(eng.summary) !== JSON.stringify(eng2.summary)) {
       console.error(`DETERMINISM FAIL on ${s.id}`);
       process.exit(1);

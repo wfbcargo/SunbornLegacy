@@ -16,7 +16,7 @@ import {
   resolveActivity,
   startSurvey,
 } from './activity.ts';
-import { skirmish } from './bridge.ts';
+import { assessSkirmish, skirmish } from './bridge.ts';
 import { allCatalog, catalogById, spawnFromCatalog } from './catalog.ts';
 import { chassisById } from './chassis.ts';
 import {
@@ -622,7 +622,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     const body = JSON.parse((await readBody(req)) || '{}') as {
       battleId?: string;
     };
-    const r = skirmish(session, body.battleId);
+    const r = skirmish(session, body.battleId, undefined, {
+      region,
+      step: clockStep,
+    });
     if (!r.ok || !r.engagement) {
       json(res, 400, { error: 'reason' in r ? r.reason : 'skirmish failed' });
       return;
@@ -637,6 +640,32 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         aliveB: last?.aliveB ?? 0,
         summary: eng.summary,
         engagementId: eng.engagementId,
+      },
+    }));
+    return;
+  }
+
+  if (method === 'POST' && path === '/api/assess-skirmish') {
+    const body = JSON.parse((await readBody(req)) || '{}') as {
+      battleId?: string;
+    };
+    const r = assessSkirmish(session, body.battleId, undefined, {
+      region,
+      step: clockStep,
+    });
+    if (!r.ok || !r.assess) {
+      json(res, 400, { error: 'reason' in r ? r.reason : 'assess failed' });
+      return;
+    }
+    const a = r.assess;
+    json(res, 200, statePayload({
+      assess: {
+        outcome: a.outcome,
+        ticksToResolve: a.ticksToResolve,
+        expectedLosses: a.expectedLosses,
+        remaining: a.remaining,
+        summary: a.summary,
+        engagementId: a.engagement.engagementId,
       },
     }));
     return;

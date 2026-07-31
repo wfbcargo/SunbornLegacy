@@ -1,6 +1,14 @@
 import { hashString, rollAt } from '../sim/rng.ts';
 import { Arena, ARENA_HEIGHT_DEFAULT, heightForForce } from './arena.ts';
 import {
+  effectiveAbilityRange,
+  effectiveDodge,
+  featureAt,
+  HexFeature,
+  MUD_MOVE_EXTRA,
+  type TerrainField,
+} from './terrain.ts';
+import {
   AbilityKind,
   type Ability,
   type BattleEvent,
@@ -22,6 +30,8 @@ const kiteLookBuf = new Int32Array(6);
 
 /** Active arena for the in-flight resolve — set by runBattle. */
 let arena = new Arena(ARENA_HEIGHT_DEFAULT);
+/** Optional biome terrain — null means all-open (pre-a1e9b472 behavior). */
+let terrain: TerrainField | null = null;
 
 function cloneFighter(f: Fighter): Fighter {
   return {
@@ -136,6 +146,7 @@ function stepForRange(
     for (let i = 0; i < 6; i++) {
       const n = neighbourBuf[i]!;
       if (n < 0 || occupied.has(n)) continue;
+      if (terrain && featureAt(terrain, n) === HexFeature.block) continue;
       const d = arena.distance(n, target.cell);
       if (d >= here) continue;
       const err = Math.abs(d - ideal);
@@ -156,6 +167,7 @@ function stepForRange(
   for (let i = 0; i < 6; i++) {
     const n = neighbourBuf[i]!;
     if (n < 0 || occupied.has(n)) continue;
+    if (terrain && featureAt(terrain, n) === HexFeature.block) continue;
     const d = arena.distance(n, target.cell);
     if (d < here) continue;
     const capped = Math.min(d, ideal);
@@ -197,6 +209,7 @@ function opensFarther(
     const n = kiteLookBuf[i]!;
     if (n < 0) continue;
     if (occupied.has(n) && n !== from) continue;
+    if (terrain && featureAt(terrain, n) === HexFeature.block) continue;
     if (arena.distance(n, targetCell) > here) return true;
   }
   return false;
@@ -211,6 +224,9 @@ function pushMove(
 ): void {
   actor.cell = to;
   actor.moveReadyIn = actor.moveCooldown;
+  if (terrain && featureAt(terrain, to) === HexFeature.mud) {
+    actor.moveReadyIn += MUD_MOVE_EXTRA;
+  }
   events.push({
     turn,
     kind: 'move',
@@ -350,8 +366,9 @@ function tryHit(
     stats.get(actor.id)!.misses++;
     return false;
   }
+  const dodgeChance = effectiveDodge(target.dodge, terrain, target.cell);
   const dodgeRoll = rollAt(battleKey, turn, actor.id, PURPOSE_DODGE, target.id, hashString(ability.id));
-  if (dodgeRoll < target.dodge) {
+  if (dodgeRoll < dodgeChance) {
     events.push({
       turn,
       kind: 'dodge',
@@ -469,8 +486,9 @@ function fireAbility(
   events: BattleEvent[],
   stats: Map<number, FighterStats>,
 ): void {
+  const range = effectiveAbilityRange(ability.range, terrain, actor.cell);
   const dist = arena.distance(actor.cell, primary.cell);
-  if (dist > ability.range) return; // caller guarantees this, but belt-and-braces
+  if (dist > range) return; // caller guarantees this, but belt-and-braces
 
   switch (ability.kind) {
     case AbilityKind.strike: {
@@ -591,27 +609,48 @@ function buildSummary(result: Omit<BattleResult, 'summary'>): string[] {
   return lines;
 }
 
+export interface RunBattleOptions {
+  title?: string;
+  arena?: Arena | number;
+  terrain?: TerrainField | null;
+}
+
 /**
  * Resolve one combat. Returns turn frames for replay (deployment = frame 0).
- * Same battleId + same fighters + same arena ⇒ bit-identical outcome.
+ * Same battleId + same fighters + same arena (+ same terrain) ⇒ bit-identical outcome.
+ *
+ * Third argument may be a title string (legacy) or RunBattleOptions.
  */
 export function runBattle(
   battleId: string,
   initial: readonly Fighter[],
-  title = battleId,
+  titleOrOpts: string | RunBattleOptions = battleId,
   arenaOrHeight?: Arena | number,
 ): BattleResult {
   if (initial.length === 0) throw new Error('runBattle requires at least one fighter');
 
+  let title = battleId;
+  let terrainOpt: TerrainField | null | undefined;
+  let arenaArg: Arena | number | undefined = arenaOrHeight;
+
+  if (typeof titleOrOpts === 'string') {
+    title = titleOrOpts;
+  } else {
+    title = titleOrOpts.title ?? battleId;
+    terrainOpt = titleOrOpts.terrain;
+    if (titleOrOpts.arena !== undefined) arenaArg = titleOrOpts.arena;
+  }
+
   const aCount = initial.filter((f) => f.side === Side.A).length;
   const bCount = initial.filter((f) => f.side === Side.B).length;
-  if (arenaOrHeight instanceof Arena) {
-    arena = arenaOrHeight;
-  } else if (typeof arenaOrHeight === 'number') {
-    arena = new Arena(arenaOrHeight);
+  if (arenaArg instanceof Arena) {
+    arena = arenaArg;
+  } else if (typeof arenaArg === 'number') {
+    arena = new Arena(arenaArg);
   } else {
     arena = new Arena(heightForForce(aCount, bCount));
   }
+  terrain = terrainOpt === undefined ? null : terrainOpt;
 
   const seen = new Set<number>();
   const cells = new Set<number>();
@@ -671,7 +710,8 @@ export function runBattle(
           const ability = actor.abilities[ai]!;
           const primary = primaryForAbility(actor, ability, fighters);
           if (primary === null) continue;
-          if (arena.distance(actor.cell, primary.cell) > ability.range) continue;
+          const range = effectiveAbilityRange(ability.range, terrain, actor.cell);
+          if (arena.distance(actor.cell, primary.cell) > range) continue;
 
           fireAbility(battleKey, turn, actor, ability, ai, primary, fighters, turnEvents, stats);
           acted = true;

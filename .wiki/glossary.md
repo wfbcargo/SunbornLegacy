@@ -17,6 +17,11 @@
   `survey_notes` into inventory.
 - **Deploy template** — Side-A battle placements (4×6 zone) on the caravan. A skirmish
   bridges them into `src/battle` vs a canned raid (lab only — no wounds written back).
+  **Assess** previews the same engagement (`outcome`, losses, ticks) without a separate
+  Monte Carlo — fixed `engagementId` ⇒ exact answer.
+- **Arena terrain** — per-hex features (`open` / `cover` / `mud` / `block` / `high`)
+  generated from the world tile's biome key. Cover raises dodge; mud slows moves; block
+  is impassable (never in deploy cols); high extends ranged ability range.
 - **Derelict** — form after the last character is gone; chassis/cargo remain until
   salvage (decision `0039`).
 - **Fertility** — biome lookup 0…3 gating `food_grower` produce (no depleting soil

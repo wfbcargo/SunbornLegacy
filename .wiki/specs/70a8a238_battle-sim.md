@@ -1,6 +1,6 @@
 # Epic 70a8a238 — Battle simulator
 
-Status: in progress
+Status: done
 Target branch: `main`
 Branch: `main--epic/70a8a238_battle-sim`
 
@@ -38,9 +38,9 @@ Settled decisions this epic inherits (do not relitigate):
 | # | Spec | Objective |
 |---|------|-----------|
 | 1 | `ba597c45_core-loop` | Runnable 40-turn battle: arena, fighters, move/attack, `npm run battle` |
-| 2 | *(next)* | Hit/armor/dodge rolls + gear-bound action stats as first-class |
-| 3 | *(next)* | Biome-derived arena terrain |
-| 4 | *(next)* | Multi-tick engagement (damage persists, positions reset) + assess preview |
+| 2 | `d8f1c3a0_hit-rolls` | Hit/armor/dodge rolls + gear-bound action stats as first-class |
+| 3 | `a1e9b472_biome-arena` | Biome-derived arena terrain |
+| 4 | `c7d2048f_assess-engagement` | Multi-tick engagement + `assessEngagement` preview |
 
 Spec 1 is the vertical slice that proves the kernel runs. Later specs deepen fidelity;
 they must not break Spec 1's determinism contract.
