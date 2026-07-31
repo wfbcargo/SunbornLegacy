@@ -38,8 +38,11 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 ORDINARY World at width/8 × height/8 running the ordinary stepDay(),
 │                 not a second stepping loop; same seed samples the same continuous
 │                 field because the noise is grid-normalised. Cycle lengths are scaled
-│                 by the catalogue's `unit`, never a hand list. makeCoarseWorld also
-│                 passes cellSizeTiles: factor so world.ts scales moisture leak and
+│                 by the catalogue's `unit`, never a hand list. Length units shrink
+│                 with factor; moisture-push units (seasons.moistureAmplitude) shrink
+│                 by factor^(1/3) so summer drought does not compound with the scaled
+│                 heat leak (decision 0032). makeCoarseWorld also passes
+│                 cellSizeTiles: factor so world.ts scales moisture leak and
 │                 THERMAL_KAPPA (decision 0031). projectBiome/projectMoisture are the
 │                 materialized-region projection. Judged by spec d53ccbb6-4
 ├── world.ts      World — owns biome/moisture/temperature/elevation/tectonic arrays,

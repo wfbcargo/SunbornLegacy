@@ -168,6 +168,22 @@ export function moistureRetention(heat: number, cellSizeTiles = 1): number {
 }
 
 /**
+ * How cycle moisture-push amplitudes shrink on a coarse cell.
+ *
+ * Spec 6 measured: after the leak scales up (`MOISTURE_LEAK_GRID_POWER`), the
+ * seasons moisture sinusoid on the coarse tier is net-drying — summer drought
+ * (moisture lags heat by half a year) compounds with the scaled heat leak and
+ * clips against the floor. Dividing push amplitudes by `cellSize^(1/3)`
+ * (= 2 at factor 8) brings garden/crucible arid within ~10 pp of fine without
+ * moving `still`. Decision `0032`.
+ */
+export const MOISTURE_PUSH_COARSE_POWER = 1 / 3;
+
+export function moisturePushCoarseScale(cellSizeTiles = 1): number {
+  return 1 / Math.pow(cellSizeTiles, MOISTURE_PUSH_COARSE_POWER);
+}
+
+/**
  * Neighbour-exchange weight for a cell of the given size.
  *
  * Penetration is `~sqrt(κ/α)` in *cells* (`THERMAL_KAPPA`'s own comment). Holding

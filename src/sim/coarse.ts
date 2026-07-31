@@ -26,7 +26,7 @@
  * `d53ccbb6-4` measures how far apart they run; nothing here should assume it is small.
  */
 
-import { World, type WorldOptions } from './world.ts';
+import { World, type WorldOptions, moisturePushCoarseScale } from './world.ts';
 import { BIOME_COUNT, type Biome } from './biomes.ts';
 import { cycleCatalogueEntry, type CycleSpec } from './cycles.ts';
 
@@ -44,13 +44,19 @@ export const COARSE_FACTOR = 8;
  * 8x too big on the coarse tier, which would show up in spec 4 as "the tiers disagree"
  * with no indication that the cause was a forgotten field name.
  *
- *   length — measured in tiles, rows or columns. Scales with resolution.
- *   count  — how many of a thing exist in the WHOLE WORLD. The world is the same world at
- *            either resolution, so these do NOT scale. Ten vents are ten vents.
- *   time   — days. The coarse tier steps once per day exactly as the fine tier does, and
- *            `medianToProbability` is a per-day rate, so these do NOT scale.
+ *   length        — measured in tiles, rows or columns. Scales with resolution.
+ *   moisture-push — additive push on the hydrology diffusion target. SHRINKS on the
+ *                   coarse tier (decision `0032`): summer drought compounds with the
+ *                   scaled heat leak. See `moisturePushCoarseScale`.
+ *   count         — how many of a thing exist in the WHOLE WORLD. The world is the same
+ *                   world at either resolution, so these do NOT scale. Ten vents are ten
+ *                   vents.
+ *   time          — days. The coarse tier steps once per day exactly as the fine tier
+ *                   does, and `medianToProbability` is a per-day rate, so these do NOT
+ *                   scale.
  */
 const LENGTH_UNITS: ReadonlySet<string> = new Set(['tiles', 'hexes', 'columns', 'rows']);
+const MOISTURE_PUSH_UNITS: ReadonlySet<string> = new Set(['moisture-push']);
 
 /**
  * Units that describe something other than a distance across the map: time, counts of
@@ -97,14 +103,15 @@ function unitOf(kind: string, param: string): string {
   return found.unit ?? '';
 }
 
-function scalesWithGrid(kind: string, param: string): boolean {
+function scalesWithGrid(kind: string, param: string): 'length' | 'moisture-push' | false {
   const unit = unitOf(kind, param);
-  if (LENGTH_UNITS.has(unit)) return true;
+  if (LENGTH_UNITS.has(unit)) return 'length';
+  if (MOISTURE_PUSH_UNITS.has(unit)) return 'moisture-push';
   if (unit === '' || INVARIANT_UNITS.has(unit)) return false;
   throw new Error(
     `Cycle parameter "${kind}.${param}" has unit "${unit}", which coarse.ts does not ` +
-      `classify. Add it to LENGTH_UNITS or INVARIANT_UNITS — guessing is how a cycle ends ` +
-      `up 8x too big on the coarse tier with nothing to say so.`,
+      `classify. Add it to LENGTH_UNITS, MOISTURE_PUSH_UNITS or INVARIANT_UNITS — guessing ` +
+      `is how a cycle ends up wrong on the coarse tier with nothing to say so.`,
   );
 }
 
@@ -169,10 +176,14 @@ export function coarseDims(width: number, height: number, factor = COARSE_FACTOR
 export function coarseCycleSpec(spec: CycleSpec, factor = COARSE_FACTOR): CycleSpec {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(effectiveSpec(spec))) {
-    out[k] =
-      !NON_PARAM_KEYS.has(k) && typeof v === 'number' && scalesWithGrid(spec.kind, k)
-        ? coarseLength(v, factor)
-        : v;
+    if (NON_PARAM_KEYS.has(k) || typeof v !== 'number') {
+      out[k] = v;
+      continue;
+    }
+    const scale = scalesWithGrid(spec.kind, k);
+    if (scale === 'length') out[k] = coarseLength(v, factor);
+    else if (scale === 'moisture-push') out[k] = v * moisturePushCoarseScale(factor);
+    else out[k] = v;
   }
   return out as CycleSpec;
 }

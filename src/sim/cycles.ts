@@ -3092,8 +3092,8 @@ export const CYCLE_CATALOGUE: readonly CycleCatalogueEntry[] = [
         note: 'Swing at the COLD BAND, about half of it at mid-latitudes. 22 is what makes ice form and thaw both reachable.',
       },
       moistureAmplitude: {
-        label: 'rain swing', type: 'number', min: 0, max: 40,
-        note: '★ Tiny on purpose. An additive push on a diffusion target with 0.9998 retention, so its steady-state gain is ~1/(1-r). At 10 the desert belt disappears.',
+        label: 'rain swing', type: 'number', min: 0, max: 40, unit: 'moisture-push',
+        note: '★ Tiny on purpose. An additive push on a diffusion target with 0.9998 retention, so its steady-state gain is ~1/(1-r). At 10 the desert belt disappears. Coarse tier shrinks this (decision 0032).',
       },
       moistureLagQuarters: {
         label: 'rain lag', type: 'number', min: 0, max: 4, unit: 'quarter-years',
