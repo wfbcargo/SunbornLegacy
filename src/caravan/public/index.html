@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sunborn Legacy — caravan lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/caravan.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand-block">
+        <p class="brand">Sunborn Legacy</p>
+        <h1>Caravan lab</h1>
+      </div>
+      <p class="lede">Outfit, settle, and march. Click neighbouring hexes to plot a route, then commit.</p>
+      <div class="actions">
+        <button id="reset-start" class="primary" type="button">Starting loadout</button>
+        <button id="reset-empty" type="button">Empty chassis</button>
+        <button id="settle" type="button">Settle outpost</button>
+        <button id="mobilise" type="button">Mobilise</button>
+        <button id="commit-path" type="button">Commit route</button>
+        <button id="clear-path" type="button">Clear path</button>
+        <button id="stall" type="button">Stall</button>
+      </div>
+      <div id="stats" class="stats" aria-live="polite"></div>
+    </header>
+
+    <section id="map-panel" aria-label="Travel map">
+      <div class="map-tools">
+        <label class="field">
+          <span>step <b id="step-label">0</b></span>
+          <input type="range" id="step" min="0" max="120" value="0">
+        </label>
+        <p id="path-status" class="path-status"></p>
+      </div>
+      <canvas id="map" width="640" height="360"></canvas>
+    </section>
+
+    <main id="stage">
+      <aside id="catalog-rail" aria-label="Catalog">
+        <header>
+          <h2>Catalog</h2>
+          <p>Click to spawn onto the bench, then fit into a matching empty slot.</p>
+        </header>
+        <div id="catalog" class="item-list"></div>
+      </aside>
+
+      <section id="wagon" aria-label="Vehicle slots">
+        <header class="wagon-head">
+          <h2 id="chassis-name">Chassis</h2>
+          <p id="vehicle-id" class="mono"></p>
+        </header>
+        <div id="slot-groups"></div>
+        <p id="error" class="error" hidden></p>
+      </section>
+
+      <aside id="bench-rail" aria-label="Bench">
+        <header>
+          <h2>Bench</h2>
+          <p>Unfitted pieces. Select one, then click an empty slot.</p>
+        </header>
+        <div id="bench" class="item-list"></div>
+        <p id="selection" class="selection">Nothing selected.</p>
+      </aside>
+    </main>
+  </div>
+  <script src="/caravan.js"></script>
+</body>
+</html>

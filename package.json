@@ -17,6 +17,8 @@
     "sim:trace": "node src/sim/diagnose.ts",
     "battle": "node src/battle/run.ts",
     "battle:view": "node src/battle/server.ts",
+    "caravan": "node src/caravan/run.ts",
+    "caravan:view": "node src/caravan/server.ts",
     "viewer": "node src/viewer/server.ts"
   },
   "engines": {

@@ -9,6 +9,10 @@ Zero **runtime** dependencies, no build step. `typescript` and `@types/node` are
 devDependencies, erased at runtime (decision `0004`).
 
 ```
+src/caravan/      headless modular-caravan kernel + local outfit lab (epic 8d614c77).
+│                 Chassis slots, fit rules, Session-2 starting loadout,
+│                 npm run caravan / caravan:view. Imports rng only; no world step.
+│                 public/ is plain HTML/CSS/JS like battle/viewer.
 src/battle/       headless combat kernel + local battle lab (epic 70a8a238).
 │                 10×6 hex arena, ability priority lists, authored scenarios,
 │                 npm run battle / battle:view. Imports rng only; does not step

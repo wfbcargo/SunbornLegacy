@@ -1,6 +1,16 @@
 # Glossary
 
 ## Domain
+- **Caravan** — the player's unit of play: characters grouped around one or more
+  vehicles. Always needs ≥1 character. Speed = slowest fitted mount or character.
+- **Chassis** — a vehicle's fixed slot layout (e.g. `basic_wagon`).
+- **Station** — every structure in the game (vehicle module, city building, outpost).
+  Fits slots typed by tier × container class (Session 11).
+- **Outpost** — a settled caravan: immobile, gains one basic/outpost station slot.
+  Requires a managing character; last character leaving collapses it. Mobilising
+  destroys the outpost slot and refunds half its station construction scrap.
+- **Leg** — an immutable travel segment: tile path + `ticksPerTile` snapshotted at
+  commit from the slowest fitted mount/character. Position at a step is a pure function.
 - **Beam / the gaze** — the Sun God's cleansing sweep across the world; the primary
   disturbance cycle. `transitDays` = severity, `cycleDays` = recovery time.
 - **Cycle** — a world-scale disturbance engine (`SolarBeam`, `Seasons`, `Tectonics`,
