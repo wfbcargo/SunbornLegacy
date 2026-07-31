@@ -218,6 +218,13 @@ export function makeCoarseWorld(opts: WorldOptions, factor = COARSE_FACTOR): Wor
     seed: opts.seed,
     seaLevel: opts.seaLevel,
     cycles: coarseSpecs,
+    // ★ THE FIELD-PHYSICS TWIN OF `coarseCycleSpec`. Cycle lengths were scaled here from
+    // day one; hydrology retention and THERMAL_KAPPA lived in world.ts and were not, so
+    // one coarse step carried moisture eight tiles' worth of ground and every dry
+    // transition went silent (decision `0030`). Passing the factor makes world.ts scale
+    // the moisture leak by `factor^MOISTURE_LEAK_GRID_POWER` and `κ` by `1/factor²`
+    // (decision `0031`).
+    cellSizeTiles: factor,
   });
 }
 

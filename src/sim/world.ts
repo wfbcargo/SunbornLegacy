@@ -122,6 +122,64 @@ export const DEFAULT_BAND_WIDTH = 8;
 export const THERMAL_KAPPA = 0.30;
 
 /**
+ * Temperate moisture retention on a 1-tile cell — the constant the hydrology comment
+ * pins to "~0.02/tile" inland falloff. Heat raises the leak; see `moistureRetention`.
+ */
+export const MOISTURE_RETENTION_TEMPERATE = 0.9998;
+const MOISTURE_LEAK_TEMPERATE = 1 - MOISTURE_RETENTION_TEMPERATE; // 0.0002
+const MOISTURE_LEAK_PER_HEAT = 0.0006;
+
+/**
+ * How the moisture leak scales when one cell represents many fine tiles.
+ *
+ * Continuum 2D diffusion from `exp(-sqrt(2(1-r))·d)` implies power **2**
+ * (`1-r_coarse = factor²·(1-r_fine)` → r≈0.9872 at factor 8). Measured on `still`
+ * 240×144 seed 20260729 after 300d (spec `d53ccbb6-5`):
+ *
+ *   power 0 (unscaled)  arid  0.00%  meanM 97.2   ← decision 0030's bug
+ *   power 1             arid 11.06%  meanM 61.9
+ *   power 1.25          arid 22.54%  meanM 48.6   ← fine is 21.74% / 57
+ *   power 2 (derived)   arid 62.85%  meanM 22.8   ← overshoots
+ *
+ * Power 2 fails because the fine inland moisture profile is not a coastal
+ * exponential (ladder 5 of the LOD gate: fine reads 51→46→56→69→71→99 going
+ * inland). Aridity is heat-driven, not coast-distance-driven, so matching the
+ * 2D coastal length scale is matching the wrong thing. 1.25 is the measured
+ * calibration that closes the ARID share; decision `0031`.
+ */
+export const MOISTURE_LEAK_GRID_POWER = 1.25;
+
+/**
+ * Moisture retention for one hydrology step on a cell that represents `cellSizeTiles`
+ * fine tiles.
+ *
+ * ★ THE LEAK SCALES WITH `cellSize^MOISTURE_LEAK_GRID_POWER`, NOT WITH `cellSize²`.
+ * See the constant above for the measurement that rejected the continuum derivation.
+ * The heat term is part of the leak, so it scales with the same power — scaling the
+ * base alone and leaving heat fixed leaves coarse arid share at 0% (measured).
+ * The `max(0.5, …)` floor is unchanged from the fine tier.
+ */
+export function moistureRetention(heat: number, cellSizeTiles = 1): number {
+  const heatLeak = Math.max(0, heat - 52) * MOISTURE_LEAK_PER_HEAT;
+  const leak =
+    (MOISTURE_LEAK_TEMPERATE + heatLeak) *
+    Math.pow(cellSizeTiles, MOISTURE_LEAK_GRID_POWER);
+  return Math.max(0.5, 1 - leak);
+}
+
+/**
+ * Neighbour-exchange weight for a cell of the given size.
+ *
+ * Penetration is `~sqrt(κ/α)` in *cells* (`THERMAL_KAPPA`'s own comment). Holding
+ * tile-scale reach fixed therefore needs `κ_coarse = κ_fine / factor²`. Decision
+ * `0030` listed this as a candidate (coarse land 2–3 units cooler); spec
+ * `d53ccbb6-5` co-ships it as the same class of bug as the hydrology leak.
+ */
+export function thermalKappaFor(cellSizeTiles = 1): number {
+  return THERMAL_KAPPA / (cellSizeTiles * cellSizeTiles);
+}
+
+/**
  * The stability bound, checked once at module evaluation rather than asserted in prose.
  *
  * An explicit two-term scheme `T += alpha*(H-T) + kappa*(mean(T_nb)-T)` needs
@@ -130,6 +188,9 @@ export const THERMAL_KAPPA = 0.30;
  * is no run in which that looks like a subtle bias; it looks like a world of NaN. This
  * throws at import, so a biome table that breaks the bound cannot reach a simulation at
  * all, let alone one whose numbers someone then records.
+ *
+ * Checked against the fine-tier constant (`cellSizeTiles = 1`). A coarse world uses a
+ * *smaller* kappa, so the bound is strictly easier there.
  */
 (() => {
   const bad = BIOMES.filter((d) => d.thermalAlpha + THERMAL_KAPPA > 1 || d.thermalAlpha <= 0);
@@ -196,11 +257,28 @@ export interface WorldOptions {
   /** Width of the beam in columns. */
   beamWidth?: number;
   seaLevel?: number;
+  /**
+   * How many fine tiles one cell of this world represents. Default 1.
+   *
+   * The coarse tier passes `COARSE_FACTOR` (8) so hydrology retention and
+   * `THERMAL_KAPPA` keep the same *tile-scale* length as the fine tier (decision
+   * `0031`). A fine world must leave this at 1 — anything else would move the
+   * goldens, and specs 1–5 require they do not move.
+   */
+  cellSizeTiles?: number;
 }
 
 export class World {
   readonly grid: HexTorus;
   readonly seed: number;
+  /**
+   * Fine tiles represented by one cell of this grid. 1 for a fine world;
+   * `COARSE_FACTOR` for a coarse one. Drives `moistureRetention` and the instance
+   * thermal kappa — see `WorldOptions.cellSizeTiles`.
+   */
+  readonly cellSizeTiles: number;
+  /** `thermalKappaFor(cellSizeTiles)` — cached so the day exchange does not recompute. */
+  private readonly thermalKappa: number;
 
   readonly biome: Uint8Array;
   readonly moisture: Float32Array;
@@ -311,6 +389,16 @@ export class World {
     this.seed = opts.seed;
     this.bandWidth = opts.bandWidth ?? DEFAULT_BAND_WIDTH;
     this.stepsPerDay = Math.ceil(opts.width / this.bandWidth);
+
+    const cellSize = opts.cellSizeTiles ?? 1;
+    if (!Number.isInteger(cellSize) || cellSize < 1) {
+      throw new Error(
+        `cellSizeTiles must be an integer >= 1 (got ${cellSize}). A fine world uses 1; ` +
+          `the coarse tier passes COARSE_FACTOR.`,
+      );
+    }
+    this.cellSizeTiles = cellSize;
+    this.thermalKappa = thermalKappaFor(cellSize);
 
     const specs: (CycleSpec | WorldCycle)[] =
       opts.cycles ??
@@ -547,14 +635,14 @@ export class World {
    * the property a double-buffer bug destroys first.
    */
   private diffuseTemperature(): void {
-    const { grid, temperature, temperatureSnapshot } = this;
+    const { grid, temperature, temperatureSnapshot, thermalKappa } = this;
     const n = grid.size;
     temperatureSnapshot.set(temperature);
     for (let i = 0; i < n; i++) {
       const t = temperatureSnapshot[i]!;
       let sum = 0;
       for (let k = 0; k < 6; k++) sum += temperatureSnapshot[grid.neighbourAt(i, k)]!;
-      temperature[i] = t + THERMAL_KAPPA * (sum / 6 - t);
+      temperature[i] = t + thermalKappa * (sum / 6 - t);
     }
   }
 
@@ -778,9 +866,15 @@ export class World {
       // retention has to sit very close to 1. At r=0.995 the decay is ~0.1/tile and
       // every continental interior is bone dry; at 0.9998 it is ~0.02/tile, which
       // carries rain properly inland and leaves the hot band arid on its own.
+      //
+      // ★ AND `r` IS PER CELL, NOT PER TILE. On a coarse world one step is `factor`
+      // tiles of ground, so the leak scales with `factor^MOISTURE_LEAK_GRID_POWER`
+      // — see `moistureRetention` and decision `0031`. Hard-coding 0.9998 here is
+      // what made every coarse continent a swamp (decision `0030`). The continuum
+      // factor² derivation overshot; 1.25 is the measured calibration.
       const neighbourAvg = moistureSum / 6;
-      const retention = 0.9998 - Math.max(0, heat - 52) * 0.0006;
-      let target = neighbourAvg * Math.max(0.5, retention);
+      const retention = moistureRetention(heat, this.cellSizeTiles);
+      let target = neighbourAvg * retention;
       // Wetland — and now river — neighbours push the diffusion target up. A river is
       // standing fresh water, so a valley floor beside one is humid; this is the channel
       // through which the biome is "wet" at all, and it is a LAND-side channel. It moves
@@ -790,7 +884,7 @@ export class World {
       // Cycle moisture enters as an additive push on the diffusion TARGET — the same
       // channel marsh neighbours use — never as a change to the retention constant.
       // Bug #1 (retention 0.9998) and bug #2 (heat is a multiplicative decay, not a
-      // flat sink) live in the two lines above and must stay out of reach of cycles.
+      // flat sink) live in moistureRetention and must stay out of reach of cycles.
       target += effect.moisture;
       const next = moisture[i]! + (target - moisture[i]!) * 0.5;
       wet = next < 0 ? 0 : next > 100 ? 100 : next;

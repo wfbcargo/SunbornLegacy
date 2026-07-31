@@ -12,7 +12,7 @@ devDependencies, erased at runtime (decision `0004`).
 src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 ├── hex.ts        HexTorus: toroidal hex grid, neighbour offsets, index<->col/row
 ├── rng.ts        hash32 / rollAt / mulberry32 / hashString (FNV-1a over a string)
-├── biomes.ts     23 biomes + 185 transition rules + climate thresholds. SEA is DERIVED
+├── biomes.ts     23 biomes + 187 transition rules + climate thresholds. SEA is DERIVED
 │                 from a predicate (water && !molten), never enumerated — see gotchas.
 │                 RuleDef (authored) and Rule (identity attached) are separate types;
 │                 a rule's roll stream comes from its content-derived keyHash (decision 0002)
@@ -38,11 +38,16 @@ src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 │                 ORDINARY World at width/8 × height/8 running the ordinary stepDay(),
 │                 not a second stepping loop; same seed samples the same continuous
 │                 field because the noise is grid-normalised. Cycle lengths are scaled
-│                 by the catalogue's `unit`, never a hand list. projectBiome/
-│                 projectMoisture are the materialized-region projection. Judged by
-│                 spec d53ccbb6-4, not by itself
-├── world.ts      World — owns biome/moisture/temperature/elevation arrays, band sweep,
-│                 the per-day maritime proximity field, stepDay()
+│                 by the catalogue's `unit`, never a hand list. makeCoarseWorld also
+│                 passes cellSizeTiles: factor so world.ts scales moisture leak and
+│                 THERMAL_KAPPA (decision 0031). projectBiome/projectMoisture are the
+│                 materialized-region projection. Judged by spec d53ccbb6-4
+├── world.ts      World — owns biome/moisture/temperature/elevation/tectonic arrays,
+│                 band sweep, stepDay(). cellSizeTiles (default 1) drives
+│                 moistureRetention and thermalKappaFor — fine tier unchanged,
+│                 coarse tier scales (decision 0031)
+├── lod.ts        LOD-agreement gate harness (npm run sim:lod). May print (R-007);
+│                 writes nothing into the stepping path
 ├── report.ts     ASCII presentation + assessStability / NicheSampler (the two tests)
 ├── run.ts        CLI entry: argv -> World -> console report
 ├── reachability.ts  PURE graph + satisfiability core: buildAdjacency, tarjan,

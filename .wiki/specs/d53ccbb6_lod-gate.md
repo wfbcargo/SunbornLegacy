@@ -67,9 +67,10 @@ read `ARCHITECTURE.md#13` Phase 1 will otherwise try to apply it again.
 | 2 | The static `tectonic` channel | `d53ccbb6-2_tectonic-channel.md` | no (channel only; see held decision) |
 | 3 | The 8×8 coarse CA over a coarse hex torus | `d53ccbb6-3_coarse-ca.md` | no (additive; tile tier untouched) |
 | 4 | `lod-agreement` — the gate that can kill the storage model | `d53ccbb6-4_lod-gate.md` | no |
+| 5 | Scale field-physics lengths with resolution (option 1 of `0030`) | `d53ccbb6-5_field-physics-scale.md` | no (fine tier unchanged) |
 
 Sequential, not parallel. Spec 1 changes how every tile's day-0 state is produced and
-specs 2–4 all build on it; running them concurrently would measure each against a moving
+specs 2–5 all build on it; running them concurrently would measure each against a moving
 baseline, which is the mistake epic `2915cb06` documented at length.
 
 **Spec 1 is a refactor whose proof is that nothing moved.** `npm run sim:golden` must
