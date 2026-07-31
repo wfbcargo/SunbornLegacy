@@ -1,7 +1,65 @@
 # Spec d53ccbb6-4 — The LOD gate
 
-Status: not started
+Status: **done — the gate FAILS** · 2026-07-30
 Epic: `d53ccbb6` · Target branch: `main--epic/d53ccbb6_lod-gate`
+
+## Result
+
+`src/sim/lod.ts` + `npm run sim:lod`. Full verdict, numbers and recommendation in
+**`.wiki/decisions/0030`**. `typecheck`, `sim:check` and `sim:golden` green; both hashes
+unchanged (`still 3bc4c35b1b99adc7`, `crucible 406cbd9ca84e3e3f`) — this spec measured and
+did not alter the world.
+
+**0/5 presets pass. 0/3 of the load-bearing three.** M1 and M2 fail on every preset; M3
+passes on four and is unresolved on `garden`.
+
+### The cause is none of the three the ladder predicted
+
+| rung | suspect | measured | verdict |
+|---|---|---|---|
+| 2 | corner sample vs modal projection | 82.04% agreement, **2.78%** composition at day 0; reseeding from the projection made composition and M1 **worse** | not the cause |
+| 3 | small filamentary biomes | the biomes that vanish are Desert / Savanna / Barren — contiguous provinces, Desert's mean patch ~4,480 tiles | not the cause |
+| 4 | cycle geometry | `still` carries no cycles and fails hardest of the five | cannot be the cause |
+| **5** | **a physical length denominated in cells** | **0.00% of coarse land is below `ARID` where 22.87% of fine land is** | **the cause** |
+
+`world.ts`'s hydrology applies its retention **once per grid step**, so its decay length is
+fixed in cells. One coarse step is 8 tiles of world, the same constant carries moisture 8×
+farther, and the coarse continents never develop interiors — mean land moisture 97.2 against
+58.2, and a flat 97 at every distance inland where the fine tier runs 51→46→56→69→71→99.
+Every `moisture < ARID` transition is then unreachable on the coarse tier, which is this
+spec's own stated hard fail.
+
+`coarse.ts` was careful that every spatial *cycle* parameter be classified explicitly
+because "a parameter nobody classified is a silent bug". The hydrology's retention and
+`THERMAL_KAPPA` are exactly that — spatial constants nobody classified, living in `world.ts`
+where `coarse.ts` could not reach them.
+
+### Shrinking `COARSE_FACTOR` is measured and rejected
+
+| factor | land below `ARID` (fine 22.87%) | M1 median | overall |
+|---|---|---|---|
+| 1 | 22.87% | 1.00× | M1 **PASS**, M2 **PASS** |
+| 2 | 4.70% | 1.39× | FAIL |
+| 4 | 0.00% | 6.29× | FAIL |
+| 8 | 0.00% | 33.00× | FAIL |
+
+Aridity is already gone at factor 4. The only factor that passes is 1, which is not LOD.
+
+### The factor-1 run is also the proof this gate can pass
+
+At `--factor 1` the two tiers are the same world and every measurement reads **1.00×** with
+M1 and M2 PASS. Spec 1's first agreement check could not fail; this one has been watched
+both fail and pass at the same size and window.
+
+### Three thresholds are argued, and **none is moved**
+
+`THRESHOLD-01/03/04` in `src/sim/lod.ts`, with the argument in `decisions/0030` §"Three
+thresholds are wrong". Every number in the verdict is the criterion applied literally; each
+has a labelled companion beside it that decides nothing. The sharpest of the three: **at
+`--factor 1`, on two bit-identical worlds, M3 still returned not-PASS** — `P(same biome | d)`
+decays to `sum(p²)`, not to zero, so `C(1)/e` can sit below the floor and the length is
+UNRESOLVED rather than long. Reported as a third value that the overall verdict treats
+exactly as a failure.
 
 ## Objective
 
