@@ -268,6 +268,7 @@ function makeContext(
     // achievable and is the permissive case for the two nucleation gates.
     downhillNeighbours: 6,
     tectonic: PERMISSIVE_TECTONIC,
+    cellSizeTiles: 1,
     flags,
     underBeam: (flags & CycleFlag.Beam) !== 0,
   };

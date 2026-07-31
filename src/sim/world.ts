@@ -917,6 +917,7 @@ export class World {
       upstreamRiverNeighbours,
       downhillNeighbours,
       tectonic: this.tectonic[i]!,
+      cellSizeTiles: this.cellSizeTiles,
       flags: effect.flags,
       underBeam: (effect.flags & CycleFlag.Beam) !== 0,
     };

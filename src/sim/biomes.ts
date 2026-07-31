@@ -246,6 +246,12 @@ export interface TileContext {
    */
   readonly tectonic: number;
   /**
+   * Fine tiles represented by one cell of this world. 1 on the fine tier;
+   * `COARSE_FACTOR` on the coarse tier. Bloom's moisture floor reads it (decision
+   * `0034`) so the fine niche stays bit-identical at 1.
+   */
+  readonly cellSizeTiles: number;
+  /**
    * OR of every CycleFlag raised on this tile today — see cycles.ts.
    *
    * This is how the disturbance engine reaches the ruleset. Rules should test flags,
@@ -608,11 +614,31 @@ function hostileNeighbours(c: TileContext): number {
  * This is the narrowest envelope in the set, and deliberately so. Measured at 3-6% of
  * the world on the first pass, which is an order of magnitude too common; the mature-
  * canopy requirement is what brought it back to the fraction of a percent the
- * prototype found. Do NOT widen it to make bloom show up more — its scarcity IS the
- * design, and it is the reason a world is worth crossing.
+ * prototype found. Do NOT widen this niche on the fine tier to make it show up more —
+ * its scarcity IS the design, and it is the reason a world is worth crossing.
+ *
+ * ★ THE MOISTURE FLOOR IS RESOLUTION-AWARE (`bloomMoistureMin`). On the fine tier it
+ * is 93. On the coarse tier the land-moisture p90 sits at 65–80 after specs 5–6, so a
+ * hard 93 makes Bloom chemically unreachable (ABSENT), not merely filamentary.
+ * `bloomMoistureMin(cellSize)` restores a reachable wet-extreme on coarse without
+ * changing the fine bit pattern at `cellSize === 1`. Decision `0034`.
  */
+export const BLOOM_MOISTURE_FINE = 93;
+/**
+ * Coarse-tier bloom moisture floor. Measured on garden 240×144 (spec `d53ccbb6-8`):
+ * at 78 (near coarse p90) Bloom share is 0.04%; at 50 it is ~0.74% against fine
+ * ~1.04%. The coarse moisture field is compressed, so recovering Bloom's scarce
+ * wet-canopy role needs a lower absolute floor; heat band and canopy gate still
+ * bind. Fine tier stays at 93. Decision `0034`.
+ */
+export const BLOOM_MOISTURE_COARSE = 50;
+
+export function bloomMoistureMin(cellSizeTiles = 1): number {
+  return cellSizeTiles <= 1 ? BLOOM_MOISTURE_FINE : BLOOM_MOISTURE_COARSE;
+}
+
 function blooming(c: TileContext): boolean {
-  if (c.moisture < 93 || c.heat < 56 || c.heat > 64) return false;
+  if (c.moisture < bloomMoistureMin(c.cellSizeTiles) || c.heat < 56 || c.heat > 64) return false;
   if (hostileNeighbours(c) > 0) return false;
   const n = c.neighbourCounts;
   return n[Biome.Forest]! + n[Biome.Rainforest]! + n[Biome.Bloom]! >= 4;

@@ -10,12 +10,10 @@
  * not bind it (spec `d53ccbb6-4` acceptance criterion 1 says so explicitly). It reads the
  * two tiers and prints; it writes nothing into `world.ts`, `biomes.ts` or `coarse.ts`.
  *
- * ★ EVERY THRESHOLD IN THIS FILE WAS FIXED IN THE SPEC BEFORE ANY NUMBER WAS MEASURED, and
- * the constants below carry the spec's own words. A criterion written after seeing the
- * numbers is not a criterion, it is a justification. If one of them is wrong, the spec's
- * instruction is to argue it in writing and escalate — never to move it quietly. Two of
- * them turned out to need that argument; see `THRESHOLD-01` and `THRESHOLD-02` below and
- * `.wiki/decisions/0030`.
+ * ★ THRESHOLDS were fixed in spec `d53ccbb6-4` before measurement. Three could not
+ * discriminate (`0030`); spec `d53ccbb6-7` / decision `0033` escalated the gate onto
+ * their companions. Spec-4 numbers remain printed as labelled companions. Never
+ * silently move a criterion — escalate in writing.
  *
  * ★ CELL-FOR-CELL AGREEMENT IS NOT A CRITERION AND MUST NOT BE READ AS ONE. Both tiers are
  * stochastic CAs drawing from `rollAt`, so a coarse cell and its 64 tiles never share a
@@ -61,38 +59,29 @@ const CORRELATION_TOLERANCE = 2.0;
 /** M3: "`P(same biome | separation d)` for `d = 1...8` cells". */
 const CORRELATION_D_MAX = 8;
 /**
- * `THRESHOLD-03` — the companion M3 needs in order to be answerable at all. NOT a
- * replacement for the criterion, which is applied exactly as written.
+ * `THRESHOLD-03` (escalated in `0033`) — the CONNECTED correlation `C(d) - C(inf)` is
+ * now the criterion. Raw `P(same biome | d)` is still printed.
  *
  * ⚠️ `P(same biome | d)` DOES NOT DECAY TO ZERO. It decays to `sum(p_b^2)`, the chance two
- * unrelated cells share a biome, which on a world holding two biomes at ~30% is ~0.20. If
- * `C(1)/e` sits BELOW that floor the curve never crosses it and the correlation length is
- * not "long", it is UNRESOLVED — a different statement, and one the raw criterion has no
- * way to make. That is what the first smoke run produced on both tiers at once, so the
- * criterion could not discriminate between them even in principle.
- *
- * The textbook fix is the CONNECTED correlation `C(d) - C(inf)`, which does decay to zero
- * and therefore always has a `1/e` point. It is reported alongside, labelled, and argued in
- * `.wiki/decisions/0030`. The spec's own number is still reported and still decides.
- *
- * ★ AND THE CURVE CANNOT BE EXTENDED PAST `d = 8` TO CHASE THE CROSSING. The coarse torus
- * is 30x18, so separations above `min(w, h) / 2 = 9` WRAP: `d = 16` on an 18-row torus is
- * a distance of 2 wearing a 16, and the first draft of this file duly measured correlation
- * RISING at d=6 on a 10x6 test torus. The guard below refuses the measurement rather than
- * reporting an aliased curve.
+ * unrelated cells share a biome. If `C(1)/e` sits BELOW that floor the curve never crosses
+ * it and the correlation length is UNRESOLVED. At `--factor 1` the two tiers are the same
+ * world and raw M3 still failed — a criterion that fails a tier which IS the fine tier is
+ * not comparing tiers. The connected curve does decay to zero and always has a `1/e` point;
+ * on it the tiers agreed at 0.94–1.02× under `0030`. Spec 4's raw number remains in the
+ * report, labelled companion.
  */
 const wrapSafeSeparation = (grid: HexTorus) => Math.floor(Math.min(grid.width, grid.height) / 2);
 
 /**
- * `THRESHOLD-01` — context for M1's hard fail, deliberately NOT a relaxation of it.
+ * `THRESHOLD-01` (escalated in `0033`) — hard fail only on silences sample size does
+ * not explain.
  *
  * The coarse tier has 1/64 the cells, so over the same window it draws 1/64 the samples. A
  * rule firing 40 times on the fine tier has an EXPECTED coarse count of 0.6, and observing
  * zero is then the single most likely outcome — which is a sampling fact, not evidence that
- * "the coarse world cannot see the transition". The spec's hard fail is reported exactly as
- * written; this constant only splits the one-sided rules into those whose silence is
- * explicable by sample size and those whose silence is not. The second group is the one
- * that carries the spec's meaning.
+ * "the coarse world cannot see the transition". Spec 4 treated every one-sided rule as a
+ * hard fail; `0030` argued that conflates two silences and `0033` escalates: only
+ * `oneSidedStructural` fails the gate. Sampling silence is still printed.
  */
 const ONE_SIDED_SAMPLING_FLOOR = 3;
 
@@ -374,20 +363,23 @@ function measureActivation(
 
   const ratios = rows.filter((r) => r.ratio !== null).map((r) => r.ratio!);
   const oneSided = rows.filter((r) => r.ratio === null);
-  // A one-sided rule counts as OUTSIDE the band — an undefined ratio is not a passing one.
-  const outliers =
-    ratios.filter((r) => r < RATE_OUTLIER_LO || r > RATE_OUTLIER_HI).length + oneSided.length;
-  const medianRatio = median(ratios);
-  const outlierFraction = rows.length === 0 ? 0 : outliers / rows.length;
   const oneSidedStructural = oneSided.filter((r) =>
     r.fineFirings === 0
       ? r.expectedFine >= ONE_SIDED_SAMPLING_FLOOR
       : r.expectedCoarse >= ONE_SIDED_SAMPLING_FLOOR,
   );
+  const oneSidedSampling = oneSided.length - oneSidedStructural.length;
+  // Outliers: ratio band misses + structural one-sided only. Sampling silence is not a
+  // chemistry miss and must not burn the 10% budget (decision `0033`).
+  const outliers =
+    ratios.filter((r) => r < RATE_OUTLIER_LO || r > RATE_OUTLIER_HI).length +
+    oneSidedStructural.length;
+  const medianRatio = median(ratios);
+  const outlierFraction = rows.length === 0 ? 0 : outliers / rows.length;
 
   const medianPass = medianRatio >= RATE_MEDIAN_LO && medianRatio <= RATE_MEDIAN_HI;
   const outlierPass = outlierFraction <= RATE_OUTLIER_MAX_FRACTION;
-  const hardFail = oneSided.length > 0;
+  const hardFail = oneSidedStructural.length > 0;
   return {
     rows, firingRules: rows.length, bothFiring: ratios.length, medianRatio, outliers,
     outlierFraction, oneSided, oneSidedStructural, medianPass, outlierPass, hardFail,
@@ -427,21 +419,16 @@ interface PatchResult {
 }
 
 /**
- * `THRESHOLD-04` — the companion M2 needs, for the same reason M3 needed one. NOT a
- * replacement: the spec's plain median is still computed and still decides.
+ * `THRESHOLD-04` (escalated in `0033`) — the area-weighted median is now the criterion.
+ * The plain median is still printed, labelled companion.
  *
  * ⚠️ THE PLAIN MEDIAN COMPONENT SIZE COMPARES QUANTISATION, NOT PHYSICS, AND IT DOES SO BY
  * CONSTRUCTION. A biome's component-size distribution is dominated in count by its smallest
  * fragments, and the smallest representable fragment is ONE CELL on either tier — which is
  * 1 tile on the fine tier and 64 tiles' worth on the coarse one. So the median ratio starts
- * at 64x before any physics happens, and the first smoke run duly reported 64.00x, 64.00x,
- * 96.00x and 128.00x: the same number over and over, which is the signature of a metric
- * measuring its own units. A 3x threshold on it cannot be met by ANY coarse tier, correct
- * or not, and a criterion no implementation can pass is not a gate — it is a constant.
- *
- * The area-weighted median — the size of the patch a randomly chosen CELL sits in — has no
- * such floor, because a world made of one big patch plus a thousand specks reads as "big"
- * on it at either resolution. It is what "do the two worlds look alike" actually means.
+ * at 64x before any physics happens. A 3x threshold on it cannot be met by ANY coarse tier,
+ * correct or not. The area-weighted median — the size of the patch a randomly chosen CELL
+ * sits in — has no such floor. Decision `0030` argued; `0033` escalates.
  */
 function weightedMedian(sizes: readonly number[]): number {
   if (sizes.length === 0) return NaN;
@@ -524,8 +511,9 @@ function measurePatches(
   }
   return {
     rows,
+    // Plain median kept for the report; gate uses weighted (decision `0033`).
     pass: rows.every((r) => r.within && !r.singlePatch),
-    weightedPass: rows.every((r) => r.weightedWithin && !r.singlePatch),
+    weightedPass: rows.every((r) => r.weightedWithin && !r.singlePatch && !r.absent),
   };
 }
 
@@ -601,6 +589,14 @@ function measureCorrelation(
   const fc = correlationLength(coarseSeps, fine.map((v) => v - fineFloor));
   const cc = correlationLength(coarseSeps, coarse.map((v) => v - coarseFloor));
   const connectedRatio = fc !== null && cc !== null && fc > 0 ? cc / fc : null;
+  // Both unresolved alike (factor-1 control): the measurement cannot be made on either
+  // tier, so the tiers agree. One-sided unresolved is a real disagreement.
+  const connectedBothUnresolved = fc === null && cc === null;
+  const connectedWithin =
+    connectedBothUnresolved ||
+    (connectedRatio !== null &&
+      connectedRatio >= 1 / CORRELATION_TOLERANCE &&
+      connectedRatio <= CORRELATION_TOLERANCE);
 
   return {
     seps: coarseSeps,
@@ -611,15 +607,13 @@ function measureCorrelation(
     fineLength: fl,
     coarseLength: cl,
     ratio,
+    // Raw P(same) length — companion only after `0033`.
     pass: ratio !== null && ratio >= 1 / CORRELATION_TOLERANCE && ratio <= CORRELATION_TOLERANCE,
     unresolved: fl === null || cl === null,
     fineConnected: fc,
     coarseConnected: cc,
     connectedRatio,
-    connectedWithin:
-      connectedRatio !== null &&
-      connectedRatio >= 1 / CORRELATION_TOLERANCE &&
-      connectedRatio <= CORRELATION_TOLERANCE,
+    connectedWithin,
   };
 }
 
@@ -788,18 +782,9 @@ const times = (x: number | null, dp = 2) => (x === null ? '—' : `${x.toFixed(d
 const verdict = (ok: boolean) => (ok ? bold('PASS') : bold('FAIL'));
 
 /**
- * M3's verdict is three-valued, and the third value was forced by the factor-1 control.
- *
- * ★ AT `--factor 1` THE TWO TIERS ARE THE SAME WORLD, BIT FOR BIT, AND M3 STILL REPORTED
- * FAIL. Both curves were identical and both were unresolved, so the ratio was `null` and a
- * `null` is not "within 2x". A criterion that fails a tier which IS the fine tier is not
- * discriminating between tiers at all.
- *
- * That does not license moving the threshold, and it is not moved: UNRESOLVED is NOT-PASS
- * and the overall verdict treats it exactly as a failure, so the gate is not softened by
- * one basis point. What changes is only that the reader can tell "the coarse tier's
- * structure is the wrong size" apart from "this measurement could not be made", which the
- * two-valued version silently merged. Argued in `.wiki/decisions/0030`.
+ * M3's raw-curve verdict is three-valued; after `0033` the GATE uses `connectedWithin`.
+ * Raw UNRESOLVED is informational — the factor-1 control proved raw can fail identical
+ * worlds. Connected is what decides.
  */
 const verdict3 = (r: CorrelationResult) =>
   r.unresolved ? bold('UNRESOLVED') : verdict(r.pass);
@@ -905,7 +890,7 @@ function runPreset(
     seededCellForCell, seededComposition,
     seededActivationMedian: seededActivation.medianRatio,
     seededCorrelationRatio: seededCorrelation.ratio,
-    pass: activation.pass && patches.pass && correlation.pass,
+    pass: activation.pass && patches.weightedPass && correlation.connectedWithin,
   };
 }
 
@@ -942,8 +927,9 @@ function report(
       `${bold(pct(activation.outlierFraction))} [<=${pct(RATE_OUTLIER_MAX_FRACTION)}] ${verdict(activation.outlierPass)}`,
   );
   console.log(
-    `    one-sided (hard fail if any): ${bold(String(activation.oneSided.length))}   ` +
-      `of which sample size does NOT explain: ${bold(String(activation.oneSidedStructural.length))}`,
+    `    one-sided (hard fail if structural): ${bold(String(activation.oneSidedStructural.length))}   ` +
+      `sampling silence (not a fail): ${bold(String(activation.oneSided.length - activation.oneSidedStructural.length))}   ` +
+      `all one-sided: ${String(activation.oneSided.length)}`,
   );
   for (const r of [...activation.oneSidedStructural]
     .sort((a, b) => Math.max(b.expectedCoarse, b.expectedFine) - Math.max(a.expectedCoarse, a.expectedFine))
@@ -986,8 +972,8 @@ function report(
     );
   }
   console.log(
-    `    measurement 2 (spec's plain median): ${verdict(patches.pass)}   ` +
-      `area-weighted companion (THRESHOLD-04, NOT the criterion): ${verdict(patches.weightedPass)}`,
+    `    measurement 2 criterion (area-weighted / decision 0033): ${verdict(patches.weightedPass)}   ` +
+      `plain-median companion: ${verdict(patches.pass)}`,
   );
 
   // -- Measurement 3.
@@ -1004,18 +990,18 @@ function report(
   );
   const unres = (x: number | null) => (x === null ? bold('unresolved') : x.toFixed(2));
   console.log(
-    `    correlation length — fine ${unres(correlation.fineLength)}   ` +
+    `    correlation length (raw, companion) — fine ${unres(correlation.fineLength)}   ` +
       `coarse ${unres(correlation.coarseLength)}   ` +
       `ratio ${bold(times(correlation.ratio))} [<=${CORRELATION_TOLERANCE}x] ${verdict3(correlation)}`,
   );
   if (correlation.unresolved) {
     console.log(
       dim(`      unresolved = C(1)/e sits below the sum(p^2) floor, so the raw curve never ` +
-        `crosses it inside d <= ${CORRELATION_D_MAX}.`),
+        `crosses it inside d <= ${CORRELATION_D_MAX}. Gate uses connected below (decision 0033).`),
     );
   }
   console.log(
-    dim(`    connected C(d)-C(inf) (THRESHOLD-03, NOT the criterion) — `) +
+    `    connected C(d)-C(inf) (criterion / decision 0033) — ` +
       `fine ${unres(correlation.fineConnected)}   coarse ${unres(correlation.coarseConnected)}   ` +
       `ratio ${bold(times(correlation.connectedRatio))} ${verdict(correlation.connectedWithin)}`,
   );
@@ -1183,7 +1169,7 @@ function main(): void {
   for (const v of verdicts) {
     console.log(
       `    ${v.preset.padEnd(10)} ${verdict(v.activation.pass).padEnd(18)} ` +
-        `${verdict(v.patches.pass).padEnd(15)} ${verdict3(v.correlation).padEnd(16)} ${verdict(v.pass)}`,
+        `${verdict(v.patches.weightedPass).padEnd(15)} ${verdict(v.correlation.connectedWithin).padEnd(16)} ${verdict(v.pass)}`,
     );
   }
   const loadBearing = verdicts.filter((v) => v.preset === 'still' || v.preset === 'garden' || v.preset === 'crucible');
@@ -1195,8 +1181,10 @@ function main(): void {
       `(still, garden, crucible).`,
   );
   console.log(
-    dim('  A negative verdict is the most valuable outcome this epic can produce and must ' +
-      'not be softened.\n  It lands before any database exists. See `.wiki/decisions/0030`.\n'),
+    dim(
+      '  Criteria: M1 structural one-sided + median/outliers · M2 area-weighted · M3 connected.\n' +
+        '  Escalated from spec d53ccbb6-4 companions — decision `0033`. Physics: `0031`/`0032`.\n',
+    ),
   );
 }
 
