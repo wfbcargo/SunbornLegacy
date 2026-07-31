@@ -9,6 +9,10 @@ Zero **runtime** dependencies, no build step. `typescript` and `@types/node` are
 devDependencies, erased at runtime (decision `0004`).
 
 ```
+src/battle/       headless combat kernel + local battle lab (epic 70a8a238).
+│                 10×6 hex arena, ability priority lists, authored scenarios,
+│                 npm run battle / battle:view. Imports rng only; does not step
+│                 the world. public/ is plain HTML/CSS/JS like the world viewer.
 src/sim/          headless terrain simulator — TypeScript, Node 24 native TS
 ├── hex.ts        HexTorus: toroidal hex grid, neighbour offsets, index<->col/row
 ├── rng.ts        hash32 / rollAt / mulberry32 / hashString (FNV-1a over a string)

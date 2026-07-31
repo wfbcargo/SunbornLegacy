@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sunborn Legacy — battle lab</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/battle.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand-block">
+        <p class="brand">Sunborn Legacy</p>
+        <h1>Battle lab</h1>
+      </div>
+
+      <label class="field scenario-field">
+        <span>scenario</span>
+        <select id="scenario"></select>
+      </label>
+
+      <p id="blurb" class="blurb" title=""></p>
+
+      <div class="transport">
+        <button id="run" class="primary" type="button">Resolve</button>
+        <button id="play" type="button">Play</button>
+        <button id="step" type="button">Step</button>
+        <button id="reset" type="button">Reset</button>
+        <button id="clear-force" class="ghost" type="button" title="Clear board">Clear</button>
+        <button id="reload-scenario" class="ghost" type="button" title="Reload scenario">Reload</button>
+      </div>
+
+      <div class="scrubbers">
+        <label class="field compact">
+          <span>round <b id="round-label">1</b>/<b id="round-max">1</b></span>
+          <input type="range" id="round" min="1" max="1" value="1">
+        </label>
+        <label class="field compact">
+          <span>turn <b id="turn-label">0</b></span>
+          <input type="range" id="scrub" min="0" max="0" value="0">
+        </label>
+        <label class="field compact">
+          <span>spd <b id="speed-label">4</b></span>
+          <input type="range" id="speed" min="1" max="20" value="4">
+        </label>
+      </div>
+    </header>
+
+    <main id="stage">
+      <aside class="force-rail" id="force-a" aria-label="Side A">
+        <header>
+          <span class="side-tag a">A</span>
+          <h2>Host</h2>
+          <b id="count-a">0</b>
+        </header>
+        <ul id="roster-a" class="force-list"></ul>
+      </aside>
+
+      <div id="board-wrap">
+        <canvas id="board" width="920" height="480"></canvas>
+        <div id="drag-ghost" hidden></div>
+        <p id="place-status" class="place-status"></p>
+        <div id="zone-legend">
+          <span class="zl a">deploy A · cols 0–3</span>
+          <span class="zl mid">neutral</span>
+          <span class="zl b">deploy B · cols 6–9</span>
+        </div>
+      </div>
+
+      <aside class="force-rail" id="force-b" aria-label="Side B">
+        <header>
+          <span class="side-tag b">B</span>
+          <h2>Raid</h2>
+          <b id="count-b">0</b>
+        </header>
+        <ul id="roster-b" class="force-list"></ul>
+        <section id="inspect" class="inspect empty">
+          <p class="inspect-hint">Click a unit to inspect</p>
+          <div id="inspect-body" hidden></div>
+        </section>
+        <div id="event-log" aria-live="polite"></div>
+      </aside>
+    </main>
+
+    <footer id="tray">
+      <div class="tray-head">
+        <h2>Unit rack</h2>
+        <p>Drag onto a deploy zone · click to select · drag tokens to rearrange</p>
+      </div>
+      <div id="template-rack" class="template-rack"></div>
+    </footer>
+
+    <section id="summary" hidden>
+      <div class="summary-card">
+        <button id="summary-close" class="ghost" type="button">close</button>
+        <p class="brand">battle summary</p>
+        <h2 id="summary-title"></h2>
+        <p id="summary-outcome" class="outcome"></p>
+        <ul id="summary-lines"></ul>
+        <div class="troop-chart-wrap">
+          <div class="troop-chart-head">
+            <h3>Troops per turn</h3>
+            <div class="troop-legend" aria-hidden="true">
+              <span class="leg a">Side A</span>
+              <span class="leg b">Side B</span>
+            </div>
+          </div>
+          <canvas id="troop-chart" width="640" height="200"></canvas>
+        </div>
+        <div class="summary-table-wrap">
+          <table id="summary-stats">
+            <thead>
+              <tr>
+                <th>fighter</th><th>side</th><th>dmg</th><th>heal</th>
+                <th>hits</th><th>miss</th><th>dodge</th><th></th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <button id="summary-replay" class="primary" type="button">Watch again</button>
+      </div>
+    </section>
+  </div>
+  <script src="/battle.js"></script>
+</body>
+</html>
