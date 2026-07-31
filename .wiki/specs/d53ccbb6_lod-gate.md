@@ -71,9 +71,10 @@ read `ARCHITECTURE.md#13` Phase 1 will otherwise try to apply it again.
 | 6 | Shrink season moisture-push on coarse (residual after `0031`) | `d53ccbb6-6_cycle-moisture-gain.md` | no |
 | 7 | Escalate the three bad LOD thresholds | `d53ccbb6-7_escalate-thresholds.md` | no |
 | 8 | Bloom moisture floor resolution-aware | `d53ccbb6-8_filament-bloom.md` | no |
+| 9 | Residual structural M1 moisture extremes | `d53ccbb6-9_residual-structural-moisture.md` | no |
 
 Sequential, not parallel. Spec 1 changes how every tile's day-0 state is produced and
-specs 2–8 all build on it; running them concurrently would measure each against a moving
+specs 2–9 all build on it; running them concurrently would measure each against a moving
 baseline, which is the mistake epic `2915cb06` documented at length.
 
 **Spec 1 is a refactor whose proof is that nothing moved.** `npm run sim:golden` must
